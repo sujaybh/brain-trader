@@ -1,0 +1,17 @@
+[Unit]
+Description=Thesis Trader tick every 15 min, 09:30-16:00 America/New_York, weekdays
+
+[Timer]
+# systemd cannot express 09:30..16:00 as one range, so three expressions (validated with
+# systemd-analyze calendar on systemd 255): 09:30, 09:45 / 10:00..15:45 / 16:00.
+OnCalendar=Mon..Fri *-*-* 09:30,45:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 10..15:00/15:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 16:00:00 America/New_York
+# Fire once on wake/boot if a run was missed while suspended or off. tick.py itself catches
+# up any DCA slot missed within catchup_hours (48h), so one late run is enough.
+Persistent=true
+AccuracySec=30s
+Unit=thesis-tick.service
+
+[Install]
+WantedBy=timers.target

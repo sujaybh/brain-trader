@@ -1,0 +1,11 @@
+{% extends "base.html" %}{% set nav='journal' %}
+{% from "_macros.html" import journal_list %}
+{% block title %}Journal{% endblock %}
+{% block body %}
+<form method="get" action="/journal" class="row" style="margin-bottom:10px">
+  <select name="since" onchange="this.form.submit()">{% for v in ['1d','7d','30d','90d','365d'] %}<option value="{{ v }}" {{ 'selected' if v==since }}>last {{ v }}</option>{% endfor %}</select>
+  <select name="kind" onchange="this.form.submit()"><option value="">all kinds</option>{% for k in kinds %}<option {{ 'selected' if k==kind }}>{{ k }}</option>{% endfor %}</select>
+  <noscript><button style="width:auto">Go</button></noscript>
+</form>
+<div class="card">{{ journal_list(journal) }}</div>
+{% endblock %}

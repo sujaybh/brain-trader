@@ -1,0 +1,14 @@
+[Unit]
+Description=Thesis Trader scheduler tick (run due DCA slots)
+After=thesis-broker.service
+Wants=thesis-broker.service
+
+[Service]
+Type=oneshot
+User=anomander
+SupplementaryGroups=thesis
+UMask=0002
+WorkingDirectory=/home/anomander/RandomProject/server-stuff/tracker
+EnvironmentFile=-/home/anomander/RandomProject/server-stuff/tracker/config/trader.env
+ExecStart=/home/anomander/RandomProject/server-stuff/tracker/.venv/bin/python /home/anomander/RandomProject/server-stuff/tracker/scheduler/tick.py
+TimeoutStartSec=10min

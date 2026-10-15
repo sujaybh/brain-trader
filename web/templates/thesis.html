@@ -1,0 +1,26 @@
+{% extends "base.html" %}{% set nav='' %}
+{% from "_macros.html" import proposal_card, positions_table, journal_list %}
+{% block title %}{{ t.name }}{% endblock %}
+{% block body %}
+<h1>{{ t.name }} <span class="pill {{ t.status }}">{{ t.status }}</span></h1>
+<div class="card">
+  <div class="pre">{{ readback }}</div>
+  <div class="muted small" style="margin-top:6px">{{ deployed|money }} of {{ spec.capital_cap|money }} deployed · mode {{ t.mode }}{% if next_slot %} · next buy {{ next_slot|local }} ET{% endif %}</div>
+  {% if spec.rationale %}<div style="margin-top:8px"><span class="muted small">Why:</span> {{ spec.rationale }}</div>{% endif %}
+  {% if t.source_text %}<div class="muted small" style="margin-top:6px">“{{ t.source_text }}”</div>{% endif %}
+  <div class="btns">
+    {% if t.status == 'active' %}
+    <form method="post" action="/api/theses/{{ t.id }}/pause"><button>Pause</button></form>
+    {% elif t.status == 'paused' %}
+    <form method="post" action="/api/theses/{{ t.id }}/resume"><button class="ok">Resume</button></form>
+    {% endif %}
+  </div>
+</div>
+{% for p in proposals %}{{ proposal_card(p, '/thesis/' ~ t.id) }}{% endfor %}
+<h2>Positions</h2>
+{% if broker_error %}<div class="muted small">{{ broker_error }}</div>{% endif %}
+{% if group %}<div class="card">{{ positions_table(group) }}</div>{% else %}<div class="muted">No positions.</div>{% endif %}
+<h2>Journal</h2>
+<div class="card">{{ journal_list(journal, false) }}</div>
+<details class="card"><summary>Spec JSON</summary><pre>{{ spec_json }}</pre></details>
+{% endblock %}

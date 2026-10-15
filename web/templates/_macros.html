@@ -1,0 +1,33 @@
+{% macro plcls(v) %}{% if v is not none %}{{ 'pos' if v > 0 else ('neg' if v < 0 else '') }}{% endif %}{% endmacro %}
+
+{% macro proposal_card(p, back='/') %}
+<div class="card">
+  <div class="row"><strong>#{{ p.id }} {{ p.summary }}</strong><span class="pill">{{ p.thesis_id }}</span></div>
+  <div class="pre" style="margin-top:4px">{{ p.reason }}</div>
+  <div class="muted small">created {{ p.created|ago }}{% if p.expires %} · expires {{ p.expires|ago }}{% endif %}</div>
+  <div class="btns">
+    <form method="post" action="/api/proposals/{{ p.id }}/approve"><input type="hidden" name="back" value="{{ back }}"><button class="ok">Approve</button></form>
+    <form method="post" action="/api/proposals/{{ p.id }}/reject"><input type="hidden" name="back" value="{{ back }}"><button class="no">Reject</button></form>
+  </div>
+</div>
+{% endmacro %}
+
+{% macro positions_table(g) %}
+<table>
+  <tr><th>Sym</th><th class="num">Qty</th><th class="num">Value</th><th class="num">P&amp;L</th></tr>
+  {% for r in g.rows %}
+  <tr><td><strong>{{ r.symbol }}</strong></td><td class="num">{{ '%g'|format(r.qty) }}</td>
+      <td class="num">{{ r.market_value|money }}<div class="muted small">cost {{ r.cost|money }}</div></td>
+      <td class="num {{ plcls(r.pl) }}">{{ r.pl|money(true) }}<div class="small">{{ r.plpc|pct }}</div></td></tr>
+  {% endfor %}
+  <tr><td><strong>Total</strong></td><td></td><td class="num"><strong>{{ g.market_value|money }}</strong></td>
+      <td class="num {{ plcls(g.pl) }}"><strong>{{ g.pl|money(true) }}</strong><div class="small">{{ g.plpc|pct }}</div></td></tr>
+</table>
+{% endmacro %}
+
+{% macro journal_list(js, show_thesis=true) %}
+{% for j in js %}
+<div class="j"><div class="muted small"><span class="k">{{ j.kind }}</span>{{ j.ts|local }}{% if show_thesis and j.thesis_id %} · <a href="/thesis/{{ j.thesis_id }}">{{ j.thesis_id }}</a>{% endif %}{% if j.symbol %} · {{ j.symbol }}{% endif %}</div>
+<div class="pre">{{ j.message }}</div></div>
+{% else %}<div class="muted">Nothing yet.</div>{% endfor %}
+{% endmacro %}

@@ -1,0 +1,11 @@
+[Unit]
+Description=Thesis Trader nightly job, weekdays 18:30 America/New_York
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 18:30:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=thesis-nightly.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+data/*.db
+data/*.db-*
+data/HALT
+.env
+config/alpaca.env
+config/broker.env
+*.log
+.pytest_cache/

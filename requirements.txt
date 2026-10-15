@@ -1,0 +1,8 @@
+alpaca-py>=0.43
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2
+croniter>=2
+requests>=2.31
+jinja2>=3.1
+pytest>=7

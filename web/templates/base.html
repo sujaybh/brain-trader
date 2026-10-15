@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Trader">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111214" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<title>{% block title %}Thesis Trader{% endblock %}</title>
+<style>
+:root{--bg:#f6f6f4;--card:#fff;--fg:#1b1c1e;--muted:#6b6f76;--line:#e3e3df;--pos:#0a7d38;--neg:#c4291c;--accent:#2457d6;--warn:#a15c00;--warnbg:#fff4e0}
+@media (prefers-color-scheme:dark){:root{--bg:#111214;--card:#1b1d20;--fg:#ececec;--muted:#9a9ea6;--line:#2c2f34;--pos:#3ccf75;--neg:#ff6b5e;--accent:#7aa2ff;--warn:#ffb648;--warnbg:#2e2512}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+ padding:calc(env(safe-area-inset-top) + 8px) 12px calc(env(safe-area-inset-bottom) + 24px)}
+main{max-width:720px;margin:0 auto}
+nav{display:flex;gap:4px;margin:0 0 12px;position:sticky;top:0;background:var(--bg);padding:6px 0;z-index:2}
+nav a{flex:1;text-align:center;padding:10px 0;border-radius:10px;color:var(--fg);text-decoration:none;font-weight:600;background:var(--card);border:1px solid var(--line)}
+nav a.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+h1{font-size:22px;margin:4px 0 8px}h2{font-size:15px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:20px 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 14px;margin:0 0 10px}
+.row{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.muted{color:var(--muted);font-size:14px}.small{font-size:13px}
+.pos{color:var(--pos)}.neg{color:var(--neg)}
+.warn{background:var(--warnbg);color:var(--warn);border-color:var(--warn)}
+.big{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
+.num{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+table{width:100%;border-collapse:collapse;font-size:15px}td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}
+th{font-weight:600;color:var(--muted);font-size:13px}tr:last-child td{border-bottom:0}
+.btns{display:flex;gap:8px;margin-top:10px}.btns form{flex:1;margin:0}
+button,.btn{display:block;width:100%;min-height:48px;font:inherit;font-weight:600;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:10px;text-align:center;text-decoration:none}
+button.ok{background:var(--pos);border-color:var(--pos);color:#fff}button.no{background:var(--neg);border-color:var(--neg);color:#fff}
+.pill{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
+.pill.active{color:var(--pos);border-color:var(--pos)}.pill.paused{color:var(--warn);border-color:var(--warn)}
+a{color:var(--accent)}
+.j{padding:8px 0;border-bottom:1px solid var(--line)}.j:last-child{border-bottom:0}
+.j .k{font-size:12px;font-weight:700;text-transform:uppercase;color:var(--muted);margin-right:6px}
+.pre{white-space:pre-wrap;word-wrap:break-word}
+pre{white-space:pre-wrap;word-wrap:break-word;font-size:12px;background:var(--bg);padding:8px;border-radius:8px;overflow-x:auto}
+textarea{width:100%;min-height:96px;font:inherit;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+select{font:inherit;min-height:40px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:4px 8px}
+.msg{margin:8px 0;padding:10px 12px;border-radius:14px;max-width:92%}
+.msg.user{background:var(--accent);color:#fff;margin-left:auto}.msg.assistant{background:var(--card);border:1px solid var(--line)}
+.msg.error{background:var(--warnbg);color:var(--warn);border:1px solid var(--warn)}
+.flash{padding:10px 12px;border-radius:12px;margin:0 0 10px;background:var(--card);border:1px solid var(--accent)}
+</style>
+</head>
+<body><main>
+<nav><a href="/" class="{{ 'on' if nav=='home' }}">Home</a><a href="/journal" class="{{ 'on' if nav=='journal' }}">Journal</a><a href="/chat" class="{{ 'on' if nav=='chat' }}">Chat</a></nav>
+{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+{% block body %}{% endblock %}
+</main></body>
+</html>

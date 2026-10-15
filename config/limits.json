@@ -1,0 +1,10 @@
+{
+  "global_cap": 1000,
+  "per_order_cap": 200,
+  "manual_thesis_cap": 200,
+  "limit_slippage_pct": 0.3,
+  "pdt_max_day_trades": 3,
+  "catchup_hours": 48,
+  "min_order_notional": 1.0,
+  "qty_decimals": 4
+}

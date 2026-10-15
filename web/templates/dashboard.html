@@ -1,0 +1,39 @@
+{% extends "base.html" %}{% set nav='home' %}
+{% from "_macros.html" import proposal_card, positions_table, journal_list, plcls %}
+{% block body %}
+{% if s.halted %}<div class="card warn"><strong>HALTED</strong> — data/HALT exists; the broker refuses all orders.</div>{% endif %}
+<div class="card">
+  {% if s.account %}
+  <div class="row"><span class="muted">Equity</span><span class="big">{{ s.account.equity|money }}</span></div>
+  <div class="row"><span class="muted">Cash</span><span class="num">{{ s.account.cash|money }}</span></div>
+  {% else %}
+  <div class="warn" style="padding:4px 0">{{ s.broker_error or 'broker unreachable' }}</div>
+  {% endif %}
+  <div class="row"><span class="muted">Deployed / global cap</span><span class="num">{{ s.deployed|money }} / {{ s.global_cap|money }}</span></div>
+</div>
+
+{% if s.proposals %}
+<h2>Waiting for you ({{ s.proposals|length }})</h2>
+{% for p in s.proposals %}{{ proposal_card(p) }}{% endfor %}
+{% endif %}
+
+<h2>Theses</h2>
+{% for t in s.theses %}
+<a href="/thesis/{{ t.id }}" style="text-decoration:none;color:inherit"><div class="card">
+  <div class="row"><strong>{{ t.name }}</strong><span class="pill {{ t.status }}">{{ t.status }}{% if t.mode == 'auto' %} · auto{% endif %}</span></div>
+  <div class="row muted small"><span>{{ t.deployed|money }} / {{ t.cap|money }}</span><span>{% if t.next_slot %}next {{ t.next_slot|local }}{% endif %}</span></div>
+  {% if t.last %}<div class="muted small" style="margin-top:4px">{{ t.last.ts|ago }}: {{ t.last.message[:110] }}</div>{% endif %}
+</div></a>
+{% else %}<div class="muted">No theses yet. Describe one in chat.</div>{% endfor %}
+
+<h2>Positions</h2>
+{% if s.broker_error and s.positions %}<div class="muted small">Prices unavailable ({{ s.broker_error }}).</div>{% endif %}
+{% for g in s.positions %}
+<div class="card"><div class="row" style="margin-bottom:4px"><strong>{% if g.thesis_id.startswith('(') %}{{ g.thesis_id }}{% else %}<a href="/thesis/{{ g.thesis_id }}">{{ g.thesis_id }}</a>{% endif %}</strong></div>
+{{ positions_table(g) }}</div>
+{% else %}<div class="muted">No positions.</div>{% endfor %}
+
+<h2>Recent activity</h2>
+<div class="card">{{ journal_list(s.journal) }}</div>
+<div class="muted small">Updated {{ s.generated|local }} ET · <a href="/journal">full journal</a></div>
+{% endblock %}

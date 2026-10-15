@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<rss version="2.0">
+    <channel>
+        <description>Latest Financial News for NVDA</description>
+        <title>Yahoo! Finance: NVDA News</title>
+        <item>
+            <description>Shares slid after the company cut its data-center outlook.</description>
+            <guid isPermaLink="false">a1</guid>
+            <link>https://finance.yahoo.com/news/nvidia-cuts-guidance-1.html</link>
+            <pubDate>Thu, 15 Oct 2026 20:21:07 +0000</pubDate>
+            <title>Nvidia cuts data-center guidance for Q4</title>
+        </item>
+        <item>
+            <guid isPermaLink="false">a2</guid>
+            <link>https://finance.yahoo.com/news/chip-stocks-2.html</link>
+            <pubDate>Thu, 15 Oct 2026 18:00:00 +0000</pubDate>
+            <title>Chip stocks tumble; are investors just repositioning?</title>
+        </item>
+        <item>
+            <guid isPermaLink="false">a3</guid>
+            <link>https://finance.yahoo.com/news/old-3.html</link>
+            <pubDate>Mon, 05 Oct 2026 12:00:00 +0000</pubDate>
+            <title>Ten days old: Nvidia at a conference</title>
+        </item>
+        <item>
+            <guid isPermaLink="false">a4</guid>
+            <description>no title on this one</description>
+        </item>
+    </channel>
+</rss>

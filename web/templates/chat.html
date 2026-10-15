@@ -1,0 +1,16 @@
+{% extends "base.html" %}{% set nav='chat' %}
+{% block title %}Chat{% endblock %}
+{% block body %}
+{% for m in messages %}
+<div class="msg {{ m.role }}"><div class="pre">{{ m.content }}</div><div class="small" style="opacity:.7;margin-top:4px">{{ m.ts|local }}</div></div>
+{% else %}<div class="muted">Ask about your positions, describe a thesis, or say "buy $20 of SPY".</div>{% endfor %}
+<form method="post" action="/chat" id="f" style="margin-top:12px">
+  <textarea name="message" placeholder="Message" required></textarea>
+  <button class="ok" id="send" style="margin-top:8px">Send</button>
+  <div class="muted small" id="wait" hidden>Thinking… this can take a minute or two. Keep this page open.</div>
+</form>
+<div id="bottom"></div>
+<script>
+document.getElementById('f').addEventListener('submit',function(){var b=document.getElementById('send');b.disabled=true;b.textContent='Sending…';document.getElementById('wait').hidden=false;});
+</script>
+{% endblock %}
