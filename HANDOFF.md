@@ -1,11 +1,12 @@
-# Handoff — 2026-10-15 evening
+# Handoff — updated 2026-10-17 (Sat) night
 
 Read `README.md` for the layout and `docs/brief.md` for the design. This file is the state
 of play and what to do next. Delete it when it stops being true.
 
 ## State right now
 
-- **v1 scaffold is built, tested (147 tests) and committed.**
+- **v1 scaffold is built, tested (165 tests) and committed.** Repo is portable: `setup.sh`,
+  templated units, tokens file scrubbed from history. Safe to push to the server.
 - **Running as user systemd units** (installed by `scheduler/install-user.sh`, lingering on):
   - `thesis-broker.service` — Alpaca **paper**, keys in `config/alpaca.env` (mode 600), localhost:8787
   - `thesis-web.service` — dashboard + chat, http://100.64.0.19:8010/?token=<WEB_TOKEN from config/trader.env>
@@ -15,7 +16,9 @@ of play and what to do next. Delete it when it stops being true.
 - **Live thesis:** `semis-q4` — $50 every Monday 10:00 ET across NVDA/AMD/AVGO/TSM, cap $300,
   max $180/name, `mode: confirm`. First slot fires **Mon 2026-10-19 10:00 ET**.
 - **ntfy topic:** in `config/trader.env` (`NTFY_TOPIC`). Pushes verified delivered to ntfy.sh.
-- **Paper account at handoff:** ~$104.5k cash, zero positions, PDT count 0.
+- **Step 0 done (Fri Oct 16):** $5 SPY bought at 9:35 ET, filled @ 772.19. The fill was only
+  pushed Saturday because nothing reconciled mid-day; fixed, every tick now reconciles open orders.
+- **Paper account:** ~$104.5k cash, SPY 0.0064 sh in `manual`, PDT count 0.
 - **Not done:** the sudo `scheduler/install.sh` (dedicated `thesis` user owning the keys).
 - **Claude cost (Oct 15 evening):** chat and `tools/review.py` shell out to `claude -p` on the
   subscription login, no API key. They now pin `CLAUDE_MODEL` (default `sonnet`; the CLI's own
@@ -42,14 +45,31 @@ systemctl --user restart thesis-broker thesis-web      # after editing code or c
 .venv/bin/python -m pytest -q                          # 147 tests, fake backend, no keys needed
 ```
 
-## What to test, in order
+## Monday 2026-10-19: autonomous live test
+
+`tools/live_check.py` exercises the whole system against the paper account with $3 orders and
+prints PASS/FAIL per check (exit 0 = all passed). Read the plan first:
+`.venv/bin/python tools/live_check.py --phase all --dry-run`. Run the phases at these times (ET),
+from the project root; a session can drive this with `/loop` or by hand:
+
+| time | command | checks |
+|---|---|---|
+| 09:35 | `tools/live_check.py --phase open` | health, clock open, IEX quotes during hours, $3 AAPL buy fills within 120s, duplicate id, refusals (per_order_cap, crypto, short sell, HALT on/off) |
+| 10:05 | `tools/live_check.py --phase slot --slot 2026-10-19T10:00` | the first DCA slot placed exactly 4 orders, idempotent re-run, ~$50 deployed, one `dca` journal row |
+| ~11:00 | `tools/live_check.py --phase idle` | proposal → web approve → $2 SPY sell, `/api/state`, news digest, snapshot with `$BENCH`, triggers, review pack |
+| 15:50 | `tools/live_check.py --phase close` | no stale open orders, PDT count consistent, every order matched by fill or refusal, HALT absent |
+
+Expect on the phone: 4 refusal pushes, HALT on/off, one proposal push, and the fills. If a
+phase fails, `tools/journal.py --since 1d --kind system` has the `live_check` rows with every
+`client_order_id` the script placed. Also watch the 10:15 tick do nothing, and the 18:30
+nightly run (news for 4 symbols, snapshot, triggers). Tuesday morning: `tools/usage.py` for
+Claude spend, `tools/review.py --thesis semis-q4` for the first real review with positions.
+
+## What to test, in order (older list)
 
 1. ~~**Phone push**~~ done Oct 15. Approve button (pause proposal #1), a real `review.py` run,
    and Reject (proposal #3) were also exercised Oct 15 evening.
-2. **Fri 09:35 ET: first real paper order.** Expect a push "Bought $5.00 SPY @ ... (manual)".
-   Check: `tools/positions.py` shows SPY under `manual`; `journal.py` shows order + fill;
-   Alpaca's paper dashboard shows the same fill. If the order sits `submitted`, the next
-   tick's reconcile picks the fill up; if it's refused, the push says which check.
+2. ~~**Fri 09:35 ET: first real paper order**~~ done; filled, see above.
 3. **Proposal buttons.** During market hours run
    `tools/propose.py --thesis manual --action '{"type":"order","side":"sell","symbol":"SPY","notional":2}' --reason "button test"`
    and tap Approve on the phone. Expect a sell fill push. Reject works the same way.
@@ -66,7 +86,7 @@ systemctl --user restart thesis-broker thesis-web      # after editing code or c
 
 ## Next steps (build order)
 
-- **Step 1 is in flight** (two unattended DCA buys). Run paper 2–4 weeks; watch for wrong
+- **Step 1 is in flight** (two unattended DCA buys: Oct 19 and Oct 26). Run paper 2–4 weeks; watch for wrong
   refusals, double pushes, missed slots after sleep.
 - **Harden**: run `sudo scheduler/install.sh` so only the `thesis` user can read the keys,
   then `systemctl --user disable --now` the user units.
@@ -74,6 +94,8 @@ systemctl --user restart thesis-broker thesis-web      # after editing code or c
 - **Step 3**: news triggers end-to-end (a `news` trigger in a thesis + a flagged story →
   review session → proposal), monthly review on the `review` cadence (`review.py --all`
   is wired but not scheduled yet; add a weekly timer that runs it).
+- **Multi-strategy expansion:** see `docs/roadmap.md` (strategy block in the spec, `strategies/`
+  plugins, backtester first; quant momentum → news → insider-following).
 - **Open questions from the brief** still unanswered: taxable vs IRA (wash-sale tracking
   is warn-only today); `auto` for pure DCA (recommended) vs `confirm` everywhere.
 
