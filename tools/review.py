@@ -42,7 +42,7 @@ from trader import client as tclient  # noqa: E402
 from trader import config, notify  # noqa: E402
 from trader.db import connect, deployed_by_thesis, get_setting, journal, qty_by_thesis, row, rows, set_setting  # noqa: E402
 from trader.spec import ThesisSpec, describe  # noqa: E402
-from web.chat import claude_cmd  # noqa: E402
+from web.chat import claude_cmd, record_usage  # noqa: E402
 
 TIMEOUT_S = 600
 CADENCE_DAYS = {"weekly": 7, "monthly": 30, "quarterly": 91}
@@ -251,18 +251,29 @@ def build_pack(conn, thesis_id: str, trigger=None) -> str:
 
 # ---------------------------------------------------------------- running claude
 
-def run_claude(prompt: str) -> tuple[bool, str]:
+def run_claude(prompt: str) -> tuple[bool, str, dict | None]:
+    """-> (ok, answer, result document). Asks for JSON so token usage can be recorded; if stdout
+    is not JSON (older CLI, or a plain-text stub) the raw text is the answer and no usage is logged."""
     try:
-        cp = subprocess.run(claude_cmd("text"), input=prompt, cwd=str(config.ROOT), capture_output=True,
+        cp = subprocess.run(claude_cmd("json"), input=prompt, cwd=str(config.ROOT), capture_output=True,
                             text=True, timeout=TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return False, f"claude timed out after {TIMEOUT_S // 60} minutes"
+        return False, f"claude timed out after {TIMEOUT_S // 60} minutes", None
     except OSError as e:
-        return False, f"could not start claude: {e}"
-    text = (cp.stdout or "").strip()
-    if cp.returncode != 0 or not text:
-        return False, (cp.stderr.strip() or text or f"claude exited {cp.returncode}")[-1000:]
-    return True, text
+        return False, f"could not start claude: {e}", None
+    raw = (cp.stdout or "").strip()
+    try:
+        out = json.loads(raw)
+    except ValueError:
+        out = None
+    if isinstance(out, dict):
+        text = str(out.get("result") or "").strip()
+        if cp.returncode != 0 or out.get("is_error") or not text:
+            return False, (text or cp.stderr.strip() or f"claude exited {cp.returncode}")[-1000:], out
+        return True, text, out
+    if cp.returncode != 0 or not raw:
+        return False, (cp.stderr.strip() or raw or f"claude exited {cp.returncode}")[-1000:], None
+    return True, raw, None
 
 
 def review_one(conn, thesis_id: str, trigger=None, pack_only: bool = False) -> dict:
@@ -270,17 +281,20 @@ def review_one(conn, thesis_id: str, trigger=None, pack_only: bool = False) -> d
     if pack_only:
         return {"ok": True, "thesis": thesis_id, "pack": pack}
     log(f"running claude for {thesis_id} ({len(pack)} chars of context)")
-    ok, answer = run_claude(pack + "\n" + INSTRUCTIONS.format(bench=BENCHMARK))
+    ok, answer, out = run_claude(pack + "\n" + INSTRUCTIONS.format(bench=BENCHMARK))
+    usage = record_usage(conn, "review", out, ok)
     if not ok:
         journal(conn, "error", f"review of {thesis_id} failed: {answer}", thesis_id=thesis_id, data={"trigger": trigger})
         notify.push(f"Review of {thesis_id} failed: {answer[:200]}", title="Review failed", tags=["warning"], conn=conn)
         return {"ok": False, "thesis": thesis_id, "reason": answer}
-    journal(conn, "review", answer, thesis_id=thesis_id, data={"trigger": trigger, "pack_chars": len(pack)})
+    journal(conn, "review", answer, thesis_id=thesis_id,
+            data={"trigger": trigger, "pack_chars": len(pack), "cost_usd": (usage or {}).get("cost_usd"),
+                  "model": (usage or {}).get("model")})
     set_setting(conn, f"last_review:{thesis_id}", datetime.now(timezone.utc).isoformat(timespec="seconds"))
     short = answer if len(answer) <= 300 else answer[:297].rstrip() + "…"
     link = f"{config.WEB_URL.rstrip('/')}/thesis/{thesis_id}?token={config.WEB_TOKEN}"
     notify.push(short, title=f"Review: {thesis_id}", tags=["mag"], click=link, conn=conn)
-    return {"ok": True, "thesis": thesis_id, "review": answer}
+    return {"ok": True, "thesis": thesis_id, "review": answer, "cost_usd": (usage or {}).get("cost_usd")}
 
 
 def due_theses(conn, today: date | None = None) -> list[str]:

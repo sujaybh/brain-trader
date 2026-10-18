@@ -63,6 +63,14 @@ OLLAMA_MODEL = env("OLLAMA_MODEL", "qwen3-coder:30b")
 OLLAMA_FALLBACK_URL = env("OLLAMA_FALLBACK_URL", "http://127.0.0.1:11434")
 OLLAMA_FALLBACK_MODEL = env("OLLAMA_FALLBACK_MODEL", "qwen3.5:latest")
 
+# Claude Code (`claude -p`) is used by dashboard chat and tools/review.py. It runs on the
+# user's Claude subscription login, so the model pin matters for plan usage. Set
+# CLAUDE_MODEL="" to inherit the CLI's own default (currently fable). Every call's token
+# counts and list-price cost go to the claude_usage table; tools/usage.py sums them and
+# compares with CLAUDE_BUDGET_USD_WEEK (0 = no budget set).
+CLAUDE_MODEL = env("CLAUDE_MODEL", "sonnet")
+CLAUDE_BUDGET_USD_WEEK = float(env("CLAUDE_BUDGET_USD_WEEK", "0") or 0)
+
 DEFAULT_LIMITS = {
     "global_cap": 1000,          # total deployed capital across all theses, USD
     "per_order_cap": 200,        # single order, USD

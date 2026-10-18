@@ -108,6 +108,24 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS claude_usage (
+    id            INTEGER PRIMARY KEY,
+    ts            TEXT NOT NULL,
+    caller        TEXT NOT NULL,                  -- chat | review
+    model         TEXT,                           -- canonical model id(s) reported by claude -p
+    session_id    TEXT,
+    turns         INTEGER,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,     -- uncached input
+    cache_read    INTEGER NOT NULL DEFAULT 0,
+    cache_write   INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd      REAL NOT NULL DEFAULT 0,        -- this call only, API list-price equivalent
+    session_cost_usd REAL,                        -- total_cost_usd as reported: cumulative over a resumed session
+    models        TEXT,                           -- modelUsage JSON as reported (cumulative), for the next delta
+    duration_ms   INTEGER,
+    ok            INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS claude_usage_ts ON claude_usage(ts);
 """
 
 

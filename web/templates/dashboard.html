@@ -10,6 +10,8 @@
   <div class="warn" style="padding:4px 0">{{ s.broker_error or 'broker unreachable' }}</div>
   {% endif %}
   <div class="row"><span class="muted">Deployed / global cap</span><span class="num">{{ s.deployed|money }} / {{ s.global_cap|money }}</span></div>
+  {% set cu = s.claude %}
+  <div class="row muted small"><span>Claude ({{ cu.model }}) 7d</span><span class="num">{{ cu.windows['7d'].cost_usd|money }} · {{ cu.windows['7d'].calls }} calls{% if cu.budget_usd_week %} · {{ cu.week_pct_of_budget }}% of {{ cu.budget_usd_week|money }}/wk{% endif %}</span></div>
 </div>
 
 {% if s.proposals %}

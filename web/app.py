@@ -24,6 +24,7 @@ from trader import client as tclient
 from trader import config
 from trader.db import connect, deployed_by_thesis, qty_by_thesis, row, rows
 from trader.spec import ThesisSpec, describe
+from tools.usage import summary as claude_usage_summary
 
 from . import chat as chatmod
 from . import proposals
@@ -204,6 +205,7 @@ def state(conn) -> dict:
         "theses": thesis_rows(conn),
         "positions": positions_by_thesis(conn, live),
         "journal": rows(conn, "SELECT * FROM journal WHERE kind!='notify' ORDER BY id DESC LIMIT 20"),
+        "claude": claude_usage_summary(conn),
     }
 
 

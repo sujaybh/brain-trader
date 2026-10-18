@@ -69,3 +69,16 @@ up to 5 minutes. The transcript is in the `chat` table.
 that is read tools plus `Bash(.venv/bin/python tools/*)` and `Bash(tools/*)`. Override it with
 `CLAUDE_ALLOWED_TOOLS` (comma-separated) in the service environment. The binary is `CLAUDE_BIN`,
 else `~/.local/bin/claude`. Money limits are enforced by the broker regardless of what chat asks for.
+
+### Model and usage
+
+`claude -p` runs on the Claude subscription login, not an API key, and would otherwise inherit
+the CLI's default model (which may be the most expensive one). The scripts pin `CLAUDE_MODEL`
+from `config/trader.env` (default `sonnet`; set it to `haiku`, `opus`, or `""` to inherit).
+`tools/review.py` uses the same command.
+
+Every call's tokens and `total_cost_usd` (API list-price equivalent, as reported by the CLI) are
+written to the `claude_usage` table. `tools/usage.py` sums them for today / 7d / 30d, by caller
+and by model; the dashboard shows the 7-day figure. Set `CLAUDE_BUDGET_USD_WEEK` to get a
+percentage against a budget. The plan's real remaining allowance is only visible with `/usage`
+in the CLI or on claude.ai; this table tells you what the scripts have been spending.

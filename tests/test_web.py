@@ -404,3 +404,103 @@ def test_chat_timeout_recorded_as_error(conn, monkeypatch):
     res = chat.send(conn, "slow question")
     assert res["ok"] is False and "5 minutes" in res["reply"]
     assert [m["role"] for m in chat.history(conn)] == ["user", "error"]
+
+
+# ---------------------------------------------------------------- claude model pin + usage tracking
+
+RESULT_DOC = {
+    "type": "result", "is_error": False, "result": "we hold NVDA", "session_id": "sess-u", "num_turns": 3,
+    "duration_ms": 4200, "total_cost_usd": 0.0123,
+    "usage": {"input_tokens": 10, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 9000, "output_tokens": 80},
+    "modelUsage": {"claude-sonnet-5-5": {"costUSD": 0.0123}},
+}
+
+
+def test_claude_cmd_pins_model(monkeypatch):
+    monkeypatch.setattr(config, "CLAUDE_MODEL", "sonnet")
+    cmd = chat.claude_cmd("json", resume="s1")
+    assert cmd[1:4] == ["-p", "--output-format", "json"]
+    assert cmd[cmd.index("--model") + 1] == "sonnet" and cmd[-2:] == ["--resume", "s1"]
+    monkeypatch.setattr(config, "CLAUDE_MODEL", "")  # inherit the CLI default
+    assert "--model" not in chat.claude_cmd("json")
+
+
+def test_chat_records_usage(web, conn, monkeypatch):
+    monkeypatch.setattr(chat.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 0, stdout=json.dumps(RESULT_DOC), stderr=""))
+    r = web.post(f"/api/chat?token={T}", json={"message": "what do we hold?"})
+    assert r.json()["ok"] and r.json()["cost_usd"] == 0.0123
+    u = db.rows(conn, "SELECT * FROM claude_usage")
+    assert len(u) == 1
+    assert u[0]["caller"] == "chat" and u[0]["model"] == "claude-sonnet-5-5" and u[0]["ok"] == 1
+    assert (u[0]["input_tokens"], u[0]["cache_write"], u[0]["cache_read"], u[0]["output_tokens"]) == (10, 500, 9000, 80)
+    assert u[0]["cost_usd"] == 0.0123 and u[0]["turns"] == 3 and u[0]["session_id"] == "sess-u"
+    # a mocked reply without usage fields records nothing
+    monkeypatch.setattr(chat.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 0, stdout=json.dumps({"result": "ok", "session_id": "sess-u"}), stderr=""))
+    web.post("/api/chat", json={"message": "again"})
+    assert len(db.rows(conn, "SELECT * FROM claude_usage")) == 1
+
+
+def test_usage_cost_is_delta_over_resumed_session(conn):
+    """total_cost_usd and modelUsage are cumulative when a session is resumed; usage tokens are per call."""
+    first = dict(RESULT_DOC, total_cost_usd=0.40, modelUsage={"claude-fable-5-1": {"costUSD": 0.40}})
+    r1 = chat.record_usage(conn, "chat", first)
+    assert r1["cost_usd"] == 0.40 and r1["model"] == "claude-fable-5-1"
+    second = dict(RESULT_DOC, total_cost_usd=0.43, modelUsage={"claude-fable-5-1": {"costUSD": 0.40},
+                                                               "claude-sonnet-5-5": {"costUSD": 0.03}})
+    r2 = chat.record_usage(conn, "chat", second)
+    assert r2["cost_usd"] == 0.03 and r2["model"] == "claude-sonnet-5-5"  # only the model that moved
+    assert r2["output_tokens"] == 80 and r2["session_cost_usd"] == 0.43
+    other = dict(RESULT_DOC, session_id="fresh", total_cost_usd=0.02)
+    assert chat.record_usage(conn, "review", other)["cost_usd"] == 0.02  # new session: no baseline to subtract
+    assert db.row(conn, "SELECT ROUND(SUM(cost_usd),4) s FROM claude_usage")["s"] == 0.45
+
+
+def test_review_records_usage_from_json(conn, monkeypatch, capsys):
+    from tools import review
+    insert_thesis(config.DB_PATH)
+    doc = dict(RESULT_DOC, result="HOLD\nFine.", session_id="sess-r")
+    monkeypatch.setattr(review.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 0, stdout=json.dumps(doc), stderr=""))
+    assert review.main(["--thesis", "semis"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["review"].startswith("HOLD") and out["cost_usd"] == 0.0123
+    u = db.row(conn, "SELECT * FROM claude_usage")
+    assert u["caller"] == "review" and u["output_tokens"] == 80
+    data = json.loads(db.row(conn, "SELECT data FROM journal WHERE kind='review'")["data"])
+    assert data["cost_usd"] == 0.0123 and data["model"] == "claude-sonnet-5-5"
+
+
+def test_review_json_error_is_failure(conn, monkeypatch, capsys):
+    from tools import review
+    insert_thesis(config.DB_PATH)
+    doc = dict(RESULT_DOC, is_error=True, result="rate limited")
+    monkeypatch.setattr(review.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 1, stdout=json.dumps(doc), stderr=""))
+    assert review.main(["--thesis", "semis"]) == 1
+    assert "rate limited" in json.loads(capsys.readouterr().out)["reason"]
+    assert db.row(conn, "SELECT ok FROM claude_usage")["ok"] == 0  # failed call still counted
+    assert db.row(conn, "SELECT * FROM journal WHERE kind='error'")
+
+
+def test_usage_tool_and_dashboard(web, conn, monkeypatch, capsys):
+    from tools import usage
+    chat.record_usage(conn, "chat", RESULT_DOC)
+    chat.record_usage(conn, "review", dict(RESULT_DOC, session_id="sess-r", total_cost_usd=0.5, modelUsage={"claude-opus-5-5": {"costUSD": 0.5}}))
+    old = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat(timespec="seconds")
+    conn.execute("INSERT INTO claude_usage(ts, caller, cost_usd, output_tokens) VALUES (?,?,?,?)", (old, "chat", 9.0, 1))
+    conn.commit()
+    monkeypatch.setattr(config, "CLAUDE_BUDGET_USD_WEEK", 2.0)
+    assert usage.main([]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["windows"]["7d"]["calls"] == 2 and out["windows"]["7d"]["cost_usd"] == 0.5123
+    assert out["windows"]["30d"]["calls"] == 3 and out["windows"]["30d"]["cost_usd"] == 9.5123
+    assert out["week_pct_of_budget"] == 25.6 and out["over_budget"] is False
+    assert {r["key"]: r["cost_usd"] for r in out["by_caller_7d"]} == {"review": 0.5, "chat": 0.0123}
+    assert [r["key"] for r in out["by_model_7d"]] == ["claude-opus-5-5", "claude-sonnet-5-5"]
+    page = web.get(f"/?token={T}").text
+    assert "Claude (" in page and "2 calls" in page and "25.6% of $2.00/wk" in page
+    monkeypatch.setattr(config, "CLAUDE_BUDGET_USD_WEEK", 0.0)
+    st = web.get("/api/state").json()["claude"]
+    assert st["budget_usd_week"] is None and st["week_pct_of_budget"] is None
