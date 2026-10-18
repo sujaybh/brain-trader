@@ -27,6 +27,19 @@ def tick(now=None, dry_run=False, conn=None, client=None) -> tuple[dict, int]:
             client_box["c"] = C.broker()
         return client_box["c"]
 
+    # Fills arrive asynchronously. Reconcile at every tick when we have open orders so a fill
+    # is journaled and pushed within 15 minutes, not at the next DCA slot or the nightly job.
+    open_orders = db.rows(conn, "SELECT client_order_id FROM orders WHERE status IN ('submitted','partially_filled')")
+    if open_orders:
+        try:
+            out["reconcile"] = get_client().reconcile().get("updated", 0)
+        except Exception as e:  # noqa: BLE001
+            out["reconcile_error"] = f"{type(e).__name__}: {e}"
+            try:
+                db.journal(conn, "error", f"tick reconcile failed: {e}")
+            except Exception:  # noqa: BLE001
+                pass
+
     for r in C.list_theses(conn, ("active",)):
         try:
             res = run_thesis(r["id"], now=now, dry_run=dry_run, conn=conn, client=_Lazy(get_client),

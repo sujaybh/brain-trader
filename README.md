@@ -22,15 +22,26 @@ docs/        brief.md, thesis-spec.md, broker-api.md
 tests/       pytest; the broker has a fake backend so the whole chain runs without keys
 ```
 
-## First run (paper)
+## Setup on a fresh machine (paper)
 
-1. `cp config/alpaca.env.example config/alpaca.env` and paste paper keys from the Alpaca
-   dashboard. `config/trader.env` already exists with random tokens and an ntfy topic.
-2. Subscribe to the ntfy topic in the ntfy iOS app (`NTFY_TOPIC` in `config/trader.env`).
-3. `sudo scheduler/install.sh` creates the `thesis` system user, moves the keys to
-   `/etc/thesis-trader/alpaca.env` (mode 600), installs and starts the systemd units.
-4. From Claude Code in this directory: "buy $5 of SPY" → `order.py` → paper fill → phone buzz.
-   That is build-order step 0 done.
+```sh
+git clone <repo> tracker && cd tracker
+./setup.sh                       # venv, requirements, config/trader.env with fresh tokens, runs the tests
+$EDITOR config/alpaca.env        # paste paper keys from the Alpaca dashboard (Paper Trading -> API keys)
+scheduler/install-user.sh        # user systemd units: broker, web, tick timer, nightly timer (no sudo)
+.venv/bin/python tools/positions.py
+```
+
+Then subscribe the ntfy app to the topic `setup.sh` printed, and open the dashboard URL it
+printed in Safari (Share -> Add to Home Screen). The phone must be on the same tailnet.
+
+Hardened variant: `sudo scheduler/install.sh` creates a `thesis` system user that alone can
+read the keys (moved to `/etc/thesis-trader/alpaca.env`) and runs the units system-wide.
+Nothing in the repo hard-codes a path or a host: the unit files use `__ROOT__`, rendered by
+the installers; `WEB_URL` and `OLLAMA_URL` live in `config/trader.env`, which is gitignored.
+
+Step 0 is done when one `tools/order.py --side buy --symbol SPY --notional 5` fills during
+market hours and the phone buzzes.
 
 Without keys you can still exercise everything:
 

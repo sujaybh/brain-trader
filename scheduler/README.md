@@ -47,7 +47,7 @@ Finished slots are remembered in `settings` (`slot_done:<thesis>:<slot>`).
 ## Running things by hand
 
 ```bash
-cd /home/anomander/RandomProject/server-stuff/tracker
+cd /path/to/tracker
 .venv/bin/python scheduler/tick.py --dry-run          # what would run now
 .venv/bin/python scheduler/tick.py                    # run it for real
 .venv/bin/python tools/run_thesis.py semis-q4 --dry-run

@@ -5,7 +5,7 @@ of play and what to do next. Delete it when it stops being true.
 
 ## State right now
 
-- **v1 scaffold is built, tested (142 tests) and committed** (`git log` → one commit).
+- **v1 scaffold is built, tested (147 tests) and committed.**
 - **Running as user systemd units** (installed by `scheduler/install-user.sh`, lingering on):
   - `thesis-broker.service` — Alpaca **paper**, keys in `config/alpaca.env` (mode 600), localhost:8787
   - `thesis-web.service` — dashboard + chat, http://100.64.0.19:8010/?token=<WEB_TOKEN from config/trader.env>
@@ -17,7 +17,15 @@ of play and what to do next. Delete it when it stops being true.
 - **ntfy topic:** in `config/trader.env` (`NTFY_TOPIC`). Pushes verified delivered to ntfy.sh.
 - **Paper account at handoff:** ~$104.5k cash, zero positions, PDT count 0.
 - **Not done:** the sudo `scheduler/install.sh` (dedicated `thesis` user owning the keys).
-  Dashboard chat and `tools/review.py` call `claude -p` and were tested only with mocks.
+- **Claude cost (Oct 15 evening):** chat and `tools/review.py` shell out to `claude -p` on the
+  subscription login, no API key. They now pin `CLAUDE_MODEL` (default `sonnet`; the CLI's own
+  default is fable) and log every call's tokens + `total_cost_usd` to `claude_usage`.
+  `tools/usage.py` sums today/7d/30d; the dashboard shows the 7d figure. Set
+  `CLAUDE_BUDGET_USD_WEEK` in `config/trader.env` to get a % of budget. The first review
+  (Oct 15, 21:22 UTC, on fable, before the pin) is not in the table.
+- **Review sessions can act:** the first real `review.py` run noticed the thesis was paused by the
+  button test and created a resume proposal on its own (allowed by CLAUDE.md, but decide whether
+  reviews should be read-only).
 
 ## Useful commands
 
@@ -30,13 +38,14 @@ journalctl --user -u thesis-broker -n 50               # broker log (also thesis
 .venv/bin/python scheduler/nightly.py                  # run the nightly job by hand
 .venv/bin/python tools/halt.py on "reason"             # kill switch; `off` to resume
 systemctl --user restart thesis-broker thesis-web      # after editing code or config
-.venv/bin/python -m pytest -q                          # 142 tests, fake backend, no keys needed
+.venv/bin/python tools/usage.py --calls 5              # Claude spend by chat/review, vs CLAUDE_BUDGET_USD_WEEK
+.venv/bin/python -m pytest -q                          # 147 tests, fake backend, no keys needed
 ```
 
 ## What to test, in order
 
-1. **Phone push** — subscribe the ntfy app to the topic. The "Hello from your broker" message
-   should be there. Tap it: the dashboard should open (phone must be on Tailscale).
+1. ~~**Phone push**~~ done Oct 15. Approve button (pause proposal #1), a real `review.py` run,
+   and Reject (proposal #3) were also exercised Oct 15 evening.
 2. **Fri 09:35 ET: first real paper order.** Expect a push "Bought $5.00 SPY @ ... (manual)".
    Check: `tools/positions.py` shows SPY under `manual`; `journal.py` shows order + fill;
    Alpaca's paper dashboard shows the same fill. If the order sits `submitted`, the next

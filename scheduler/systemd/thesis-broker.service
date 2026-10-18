@@ -7,13 +7,13 @@ Wants=network-online.target
 Type=simple
 User=thesis
 Group=thesis
-WorkingDirectory=/home/anomander/RandomProject/server-stuff/tracker
+WorkingDirectory=__ROOT__
 # Alpaca keys: readable only by the thesis user (chmod 600). Non-secret settings (BROKER_HOST
 # must stay 127.0.0.1) come from the project's config/trader.env.
 EnvironmentFile=/etc/thesis-trader/alpaca.env
-EnvironmentFile=-/home/anomander/RandomProject/server-stuff/tracker/config/trader.env
+EnvironmentFile=-__ROOT__/config/trader.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/anomander/RandomProject/server-stuff/tracker/.venv/bin/python -m broker
+ExecStart=__ROOT__/.venv/bin/python -m broker
 Restart=always
 RestartSec=5
 # data/ is shared with anomander through the thesis group: keep new files group-writable.
@@ -21,7 +21,7 @@ UMask=0007
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/home/anomander/RandomProject/server-stuff/tracker/data
+ReadWritePaths=__ROOT__/data
 
 [Install]
 WantedBy=multi-user.target

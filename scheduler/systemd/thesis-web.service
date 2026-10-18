@@ -8,10 +8,10 @@ Type=simple
 User=anomander
 SupplementaryGroups=thesis
 UMask=0002
-WorkingDirectory=/home/anomander/RandomProject/server-stuff/tracker
-EnvironmentFile=-/home/anomander/RandomProject/server-stuff/tracker/config/trader.env
+WorkingDirectory=__ROOT__
+EnvironmentFile=-__ROOT__/config/trader.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/anomander/RandomProject/server-stuff/tracker/.venv/bin/python -m web
+ExecStart=__ROOT__/.venv/bin/python -m web
 Restart=always
 RestartSec=5
 

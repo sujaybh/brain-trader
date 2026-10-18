@@ -12,7 +12,8 @@
 #      chown thesis:thesis + chmod 600.
 #   4. Makes data/ owned by group `thesis`, setgid, group-writable, so the broker (thesis) and the
 #      tools/scheduler/web (anomander) share the SQLite DB.
-#   5. Symlinks scheduler/systemd/*.service|*.timer into /etc/systemd/system/, daemon-reload,
+#   5. Renders scheduler/systemd/*.service|*.timer (with __ROOT__ = this checkout) into
+#      /etc/systemd/system/, daemon-reload,
 #      enables+starts thesis-broker and thesis-web, enables+starts the tick and nightly timers.
 # Undo with scheduler/uninstall.sh.
 set -euo pipefail
@@ -27,9 +28,6 @@ OWNER="$(stat -c %U "$ROOT")"
 UNITS=(thesis-broker.service thesis-tick.service thesis-tick.timer thesis-nightly.service thesis-nightly.timer thesis-web.service)
 echo "Project root: $ROOT (owner: $OWNER)"
 
-if [[ "$ROOT" != /home/anomander/RandomProject/server-stuff/tracker ]]; then
-  echo "WARNING: unit files hard-code /home/anomander/RandomProject/server-stuff/tracker; edit them for $ROOT." >&2
-fi
 
 # 1. user + group
 if ! getent group thesis >/dev/null; then
@@ -75,7 +73,7 @@ find "$ROOT/data" -type f -exec chmod g+rw {} +
 
 # 5. units
 for u in "${UNITS[@]}"; do
-  ln -sfn "$ROOT/scheduler/systemd/$u" "/etc/systemd/system/$u"
+  sed -e "s|__ROOT__|$ROOT|g" -e "s|^User=anomander|User=$OWNER|" "$ROOT/scheduler/systemd/$u" > "/etc/systemd/system/$u"
 done
 systemctl daemon-reload
 systemctl enable --now thesis-broker.service

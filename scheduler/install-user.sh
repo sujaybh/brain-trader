@@ -16,6 +16,7 @@ for u in thesis-broker.service thesis-web.service thesis-tick.service thesis-tic
   # strip the per-user hardening that only applies to system units; point the broker at the
   # project's own keys file; install into the user default target.
   sed -E \
+    -e "s|__ROOT__|$ROOT|g" \
     -e '/^(User|Group|SupplementaryGroups|UMask|NoNewPrivileges|PrivateTmp|ProtectSystem|ReadWritePaths)=/d' \
     -e "s|^EnvironmentFile=/etc/thesis-trader/alpaca.env|EnvironmentFile=$ROOT/config/alpaca.env|" \
     -e 's/^WantedBy=multi-user.target/WantedBy=default.target/' \
