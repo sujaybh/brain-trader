@@ -9,3 +9,4 @@ config/alpaca.env
 config/broker.env
 *.log
 .pytest_cache/
+config/trader.env
