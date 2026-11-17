@@ -9,6 +9,8 @@ with `status` already mapped to our vocabulary:
 """
 from __future__ import annotations
 
+import hashlib
+import math
 import os
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
@@ -38,6 +40,7 @@ class Backend(Protocol):
                            client_order_id: str) -> dict: ...
     def get_order(self, broker_order_id: str) -> dict: ...
     def cancel_order(self, broker_order_id: str) -> None: ...
+    def daily_bars(self, symbols: list[str], start: date, end: date) -> dict[str, list[dict]]: ...
 
 
 # Alpaca order status -> ours. Anything not terminal maps to `submitted` so reconcile keeps
@@ -178,6 +181,30 @@ class AlpacaBackend:
     def cancel_order(self, broker_order_id: str) -> None:
         self._call(self._trading.cancel_order_by_id, broker_order_id)
 
+    def daily_bars(self, symbols: list[str], start: date, end: date) -> dict[str, list[dict]]:
+        """Daily bars from the free IEX feed, adjusted for splits and dividends, keyed by the
+        bar's trading date in market time. Symbols with no data map to []."""
+        from alpaca.data.enums import Adjustment, DataFeed
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+
+        t0 = datetime.combine(start, time(0, 0), config.MARKET_TZ)
+        t1 = min(datetime.combine(end + timedelta(days=1), time(0, 0), config.MARKET_TZ),
+                 datetime.now(timezone.utc))
+        req = StockBarsRequest(symbol_or_symbols=symbols, timeframe=TimeFrame.Day, start=t0, end=t1,
+                               feed=DataFeed.IEX, adjustment=Adjustment.ALL)
+        data = getattr(self._call(self._data.get_stock_bars, req), "data", {}) or {}
+        out: dict[str, list[dict]] = {}
+        for s in symbols:
+            rows = []
+            for b in data.get(s, []) or []:
+                d = b.timestamp.astimezone(config.MARKET_TZ).date()
+                if start <= d <= end:
+                    rows.append({"date": d.isoformat(), "open": _f(b.open), "high": _f(b.high), "low": _f(b.low),
+                                 "close": _f(b.close), "volume": _f(b.volume), "vwap": _f(b.vwap)})
+            out[s] = rows
+        return out
+
     @staticmethod
     def _order_dict(o: Any) -> dict:
         filled = float(o.filled_qty or 0)
@@ -208,6 +235,31 @@ FAKE_QUOTES: dict[str, tuple[float, float, float]] = {  # bid, ask, last
 FAKE_NAMES = {"SPY": "SPDR S&P 500 ETF", "NVDA": "NVIDIA Corp", "AMD": "Advanced Micro Devices",
               "AVGO": "Broadcom Inc", "TSM": "Taiwan Semiconductor ADR", "AAPL": "Apple Inc",
               "MSFT": "Microsoft Corp", "BTCUSD": "Bitcoin"}
+
+
+def _unit(*parts: Any) -> float:
+    """Deterministic pseudo-random number in [0, 1) from the parts."""
+    h = hashlib.sha256(":".join(str(p) for p in parts).encode()).digest()
+    return int.from_bytes(h[:8], "big") / 2 ** 64
+
+
+def fake_bar(symbol: str, d: date) -> dict:
+    """Closed-form synthetic daily bar: per-symbol drift, a slow cycle and daily noise around the
+    fake quote, so momentum ranks differ by symbol and change over time."""
+    base = FAKE_QUOTES.get(symbol, (100.0, 100.0, 100.0))[2]
+    n = (d - date(2026, 1, 2)).days
+    drift = (_unit(symbol, "drift") - 0.4) * 0.0012           # per calendar day
+    amp, period = 0.08 + 0.12 * _unit(symbol, "amp"), 60 + 240 * _unit(symbol, "period")
+    phase = 2 * math.pi * _unit(symbol, "phase")
+    def px(k: int, salt: str) -> float:
+        noise = (_unit(symbol, k, salt) - 0.5) * 0.02
+        return base * math.exp(drift * k + amp * math.sin(2 * math.pi * k / period + phase) + noise)
+    o, c = px(n, "o"), px(n, "c")
+    hi = max(o, c) * (1 + 0.01 * _unit(symbol, n, "h"))
+    lo = min(o, c) * (1 - 0.01 * _unit(symbol, n, "l"))
+    return {"date": d.isoformat(), "open": round(o, 2), "high": round(hi, 2), "low": round(lo, 2),
+            "close": round(c, 2), "volume": float(int(1e6 * (1 + _unit(symbol, n, "v")))),
+            "vwap": round((o + c + hi + lo) / 4, 2)}
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -274,6 +326,22 @@ class FakeBackend:
             else:
                 out[s] = {"tradable": True, "fractionable": True, "name": FAKE_NAMES.get(s, s),
                           "exchange": "NASDAQ" if s != "SPY" else "ARCA", "asset_class": "us_equity"}
+        return out
+
+    def daily_bars(self, symbols: list[str], start: date, end: date) -> dict[str, list[dict]]:
+        """Deterministic synthetic weekday bars: the same (symbol, date) always gives the same
+        bar, whatever window is asked for, so incremental updates and tests are stable."""
+        out: dict[str, list[dict]] = {}
+        for s in symbols:
+            if s not in self.quote_table or s == "BTCUSD":
+                out[s] = []
+                continue
+            rows, d = [], start
+            while d <= end:
+                if d.weekday() < 5:
+                    rows.append(fake_bar(s, d))
+                d += timedelta(days=1)
+            out[s] = rows
         return out
 
     # -- account

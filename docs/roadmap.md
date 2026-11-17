@@ -1,5 +1,18 @@
 # Roadmap: from one DCA thesis to a multi-strategy lab
 
+## Status (2026-11)
+
+| item | state |
+|---|---|
+| `strategy` block in the spec, registry, `Signal`/`MarketData`/`ThesisState` (`strategies/base.py`) | done |
+| `momentum` (lookback_days, top_n, monthly/weekly) and a `dca` adapter for replays | done |
+| bars: broker `GET /bars` (IEX daily), `bars` table, `tools/bars.py`, nightly `bars` step | done |
+| backtester: `strategies/backtest.py` + `tools/backtest.py` (same signals, same caps, next-open fills, SPY benchmark, lookahead guard, sweep warning) | done |
+| `tools/run_strategy.py`: signals -> confirm proposals, idempotent per period | done, **not on a timer** |
+| `auto` mode for strategies (orders without a tap) | not built; run_strategy skips auto theses |
+| per-thesis benchmarking on the dashboard, per-family/per-sector caps | open |
+| mean_reversion, news, insider, earnings families | open |
+
 The v1 pipeline is `thesis spec → deterministic executor → broker limit chain → journal`.
 Every strategy family below plugs into that same pipeline. Nothing bypasses the broker, and
 nothing in a prompt decides on a schedule. What changes per family is only **how a signal is
@@ -46,7 +59,7 @@ information is not something this system can or should do.
 
 ## What has to exist before a second family is worth running
 
-1. **Bars + a backtester.** `strategies/backtest.py`: replay a spec over stored daily bars
+1. **Bars + a backtester.** *(done; see Status)* `strategies/backtest.py`: replay a spec over stored daily bars
    with the same `signals()` function, same caps, a simple fill model (next open, slippage
    = our limit offset), and output P&L, drawdown, turnover, number of trades. Without this,
    every new family is a guess. Store bars in a `bars` table filled nightly.

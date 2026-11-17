@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional, Union
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 
 from . import config
 
@@ -21,6 +21,14 @@ class Schedule(BaseModel):
     amount: float = Field(gt=0, description="USD per scheduled run, split across the universe")
     cron: str = "0 10 * * 1"
     tz: str = "America/New_York"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _none_needs_no_amount(cls, v):
+        # `{"type": "none"}` used to be rejected for lacking an amount it never uses.
+        if isinstance(v, dict) and v.get("type") == "none" and v.get("amount") is None:
+            v = {**v, "amount": 1}
+        return v
 
     @field_validator("cron")
     @classmethod
@@ -62,6 +70,25 @@ class Trigger(BaseModel):
         return self
 
 
+class DcaStrategy(BaseModel):
+    """v1 behaviour, spelled out: buy `schedule.amount` on `schedule.cron`. Same as no block."""
+    model_config = {"extra": "forbid"}
+    type: Literal["dca"] = "dca"
+
+
+class MomentumStrategy(BaseModel):
+    """Hold the `top_n` names of the universe with the best `lookback_days` (trading days)
+    return, equal weight, re-ranked once per `rebalance` period. See strategies/momentum.py."""
+    model_config = {"extra": "forbid"}
+    type: Literal["momentum"]
+    lookback_days: int = Field(default=126, ge=5, le=504)
+    top_n: int = Field(default=3, ge=1, le=25)
+    rebalance: Literal["monthly", "weekly"] = "monthly"
+
+
+Strategy = Annotated[Union[DcaStrategy, MomentumStrategy], Field(discriminator="type")]
+
+
 class ThesisSpec(BaseModel):
     id: str
     name: str = Field(min_length=1, max_length=80)
@@ -73,6 +100,7 @@ class ThesisSpec(BaseModel):
     entry: Entry = Entry()
     exit: Exit = Exit()
     triggers: list[Trigger] = []
+    strategy: Optional[Strategy] = None  # None = v1 behaviour (driven by `schedule`)
     mode: Literal["confirm", "auto"] = "confirm"
     review: Literal["weekly", "monthly", "quarterly"] = "monthly"
     status: Literal["active", "paused", "closed"] = "active"
@@ -102,13 +130,37 @@ class ThesisSpec(BaseModel):
     def _consistency(self):
         if self.schedule.type == "dca" and self.schedule.amount > self.capital_cap:
             raise ValueError("schedule.amount exceeds capital_cap")
+        st = self.strategy
+        if st is not None and st.type == "dca" and self.schedule.type != "dca":
+            raise ValueError("strategy.type dca needs schedule.type dca (amount and cron)")
+        if st is not None and st.type != "dca":
+            if self.schedule.type == "dca":
+                raise ValueError(f"a {st.type} thesis must have schedule.type none; the DCA tick would also buy")
+            if self.entry.type != "schedule_only":
+                raise ValueError(f"a {st.type} thesis needs entry.type schedule_only")
+        if st is not None and st.type == "momentum" and st.top_n > len(self.universe):
+            raise ValueError(f"strategy.top_n ({st.top_n}) is larger than the universe ({len(self.universe)})")
         if self.max_position_pct * len(self.universe) < 100 and self.schedule.type == "dca":
             # not fatal, but the cap can never be fully deployed; allow it (user may want that)
             pass
         return self
 
+    @model_serializer(mode="wrap")
+    def _dump(self, handler):
+        # v1 specs (no strategy block) serialize exactly as before: no "strategy": null key.
+        d = handler(self)
+        if isinstance(d, dict) and d.get("strategy", 0) is None:
+            d.pop("strategy")
+        return d
+
     def max_position_usd(self) -> float:
         return round(self.capital_cap * self.max_position_pct / 100, 2)
+
+    def strategy_type(self) -> str:
+        """`dca` for v1 specs with a DCA schedule, `none` for schedule-less ones, else the block's type."""
+        if self.strategy is not None:
+            return self.strategy.type
+        return "dca" if self.schedule.type == "dca" else "none"
 
 
 def manual_spec(cap: float) -> ThesisSpec:
@@ -156,7 +208,13 @@ def describe(spec: ThesisSpec) -> str:
     """One plain-English paragraph the user confirms before thesis_create stores the spec."""
     names = "/".join(spec.universe)
     parts = []
-    if spec.schedule.type == "dca":
+    st = spec.strategy
+    if st is not None and st.type == "momentum":
+        every = {"monthly": "Once a month", "weekly": "Once a week"}[st.rebalance]
+        each = min(spec.capital_cap / st.top_n, spec.max_position_usd())
+        parts.append(f"{every}, rank {names} by their {st.lookback_days}-trading-day return and hold the "
+                     f"top {st.top_n} in equal weight (about ${each:,.0f} each), selling names that drop out")
+    elif spec.schedule.type == "dca":
         parts.append(f"{_cap(_cron_english(spec.schedule.cron, spec.schedule.tz))}, "
                      f"buy ${spec.schedule.amount:g} split across {names}")
     else:
@@ -178,6 +236,10 @@ def describe(spec: ThesisSpec) -> str:
         parts.append(f"{'propose an exit' if spec.exit.review_only else 'sell'} at a {spec.exit.stop_loss_pct:g}% loss")
     if spec.exit.take_profit_pct:
         parts.append(f"{'propose taking profit' if spec.exit.review_only else 'take profit'} at +{spec.exit.take_profit_pct:g}%")
-    parts.append(f"{'ask before acting' if spec.mode == 'confirm' else 'act and tell me'}")
+    if st is not None and st.type != "dca":
+        parts.append("propose every trade for my approval" if spec.mode == "confirm" else
+                     "act and tell me (for now the strategy runner still only proposes)")
+    else:
+        parts.append(f"{'ask before acting' if spec.mode == 'confirm' else 'act and tell me'}")
     parts.append(f"review {spec.review}")
     return "; ".join(parts) + "."

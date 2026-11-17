@@ -39,6 +39,9 @@ class StubBroker:
         self.positions_list: list[dict] = []
         self.clock_calls = 0
 
+    def health(self):
+        return {"ok": True, "backend": "stub", "paper": True, "halted": False}
+
     def clock(self):
         self.clock_calls += 1
         return {"is_open": self.is_open, "next_open": "2026-10-20T09:30:00-04:00"}
@@ -57,6 +60,12 @@ class StubBroker:
 
     def reconcile(self):
         return {"updated": 0, "positions": self.positions_list}
+
+    def bars(self, symbols, start=None, end=None, days=None):
+        from datetime import date
+        from broker.backends import FakeBackend
+        return {"source": "fake", "start": start, "end": end,
+                "bars": FakeBackend().daily_bars(symbols, date.fromisoformat(start), date.fromisoformat(end))}
 
     def place_order(self, *, thesis_id, side, symbol, notional=None, qty=None, client_order_id=None, reason=""):
         self.calls.append(dict(thesis_id=thesis_id, side=side, symbol=symbol, notional=notional, qty=qty,
@@ -397,7 +406,7 @@ def test_nightly_step_failure_is_journaled_and_next_steps_run(broker, tmp_path, 
     out = json.loads(capsys.readouterr().out)
     assert code == 1
     assert [(s["step"], s["ok"]) for s in out["steps"]] == [
-        ("reconcile", False), ("snapshot", False), ("news", True), ("check_triggers", True)]
+        ("reconcile", False), ("snapshot", False), ("news", True), ("check_triggers", True), ("bars", True)]
     assert news_calls[0] == ("news.py", ["AMD", "AVGO", "NVDA", "TSM", "--since", "24h"])
     errs = journal_kinds("error")
     assert len(errs) == 2 and "alpaca is down" in errs[0]["message"]
