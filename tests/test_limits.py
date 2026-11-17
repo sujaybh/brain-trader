@@ -58,6 +58,22 @@ def test_marketable_limit_prices():
     assert limit_price("buy", {"bid": 1, "ask": 0}, 0.3) is None
 
 
+def test_limit_anchors_on_last_trade_when_quote_is_wide():
+    # IEX ask 6% above the tape (AMD 2026-10-19 10:00): anchor on the last trade, not the ask
+    q = {"bid": 540.00, "ask": 580.40, "last": 546.67}
+    assert limit_price("buy", q, 0.3) == 548.31   # 546.67 * 1.003
+    # a sell anchors on the higher of bid and last
+    q = {"bid": 366.00, "ask": 483.50, "last": 425.80}
+    assert limit_price("sell", q, 0.3) == 424.52  # 425.80 * 0.997
+    # tight market: quote and last agree, same as before
+    assert limit_price("buy", {"bid": 183.10, "ask": 183.20, "last": 183.15}, 0.3) == 183.70
+    # ask below last (tape stale, quote fresh): still the lower reference for a buy
+    assert limit_price("buy", {"bid": 99.0, "ask": 100.0, "last": 101.0}, 0.3) == 100.30
+    # IEX ask 0 (seen after hours) but a last trade exists: usable
+    assert limit_price("buy", {"bid": 205.1, "ask": 0.0, "last": 216.41}, 0.3) == 217.06
+    assert limit_price("sell", {"bid": 0, "ask": 0, "last": None}, 0.3) is None
+
+
 def test_fractional_qty_floors():
     assert floor_to(50 / 183.75, 4) == 0.2721
     assert floor_to(0.29999999, 4) == 0.2999

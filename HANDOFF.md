@@ -99,10 +99,37 @@ Claude spend, `tools/review.py --thesis semis-q4` for the first real review with
 - **Open questions from the brief** still unanswered: taxable vs IRA (wash-sale tracking
   is warn-only today); `auto` for pure DCA (recommended) vs `confirm` everywhere.
 
+## Test day — Thu 2026-10-22: PASSED
+
+All four steps worked end to end on paper, every fill within 0.3% of the limit (new anchoring):
+
+| ET | Step | Result |
+|---|---|---|
+| 09:42 | you in chat: "Buy 5 dollars of spy" | `order.py` placed 0.0065 SPY limit 768.93, filled 766.66, journaled by the 09:45 tick |
+| 11:00 | scripted chat → proposal #4 | buy $10 AMD with a two-sentence thesis reason; approved in 31 s; filled 512.48 (limit 513.88); journaled 11:15 |
+| 13:30 | scripted chat → proposal #5 | sell all 0.0129 SPY (both lots); approved in 13 s; filled 763.18 above the 760.94 floor; `pdt_log` row 1 |
+| 15:30 | `review.py --thesis semis-q4` | HOLD, pushed |
+
+Reminder pushes at 09:15/09:40/10:58/13:28/15:28/16:10 all fired (laptop woke 09:11). Claude spend
+for the day: $0.40 on sonnet (3 chat calls + 1 review). `data/testday/` can be deleted or kept as
+the template for the next scripted day.
+
+Small things seen:
+- Fill pushes arrive at the next 15-min tick, so 2–15 min after the fill. Fine for DCA; a
+  faster path would be the broker polling its own open orders every minute.
+- `positions.py` shows the closed manual SPY position as qty 0 with cost $0.08 and P&L −$0.08:
+  that is the realized loss on the round trip leaking into the "unrealized" column. Closed
+  positions should drop out and realized P&L be reported separately (nightly snapshot too).
+- Alpaca's `daytrade_count` stayed 0 while our `pdt_log` has 1; our counter is the one the
+  broker enforces, so this is harmless, but worth re-checking tomorrow after Alpaca's rollover.
+
 ## Known gaps / gotchas
 
-- Alpaca IEX quotes after hours can carry `ask: 0`; the broker refuses those as "no usable
-  quote" rather than mispricing. During hours this hasn't been observed yet.
+- Alpaca IEX quotes are thin: on Mon 10-19 at 10:00 ET the ask was 6% above the tape on AMD
+  and TSM, so "ask + 0.3%" limits were 6% above the fills. Since Tue 10-20 the buy limit is
+  (1+s) × min(ask, last) and the sell limit (1−s) × max(bid, last) (`broker/limits.py`). After
+  hours `ask: 0` with a last trade is now priced off the last trade; the market-closed check
+  still refuses the order.
 - `per_order_cap` ($200) applies to sells too, so a position above $200 needs two sell orders.
 - A refused DCA symbol is not retried that slot (by design, to avoid a push every 15 min).
 - Stop-loss / take-profit always produce proposals, never automatic sells, even with

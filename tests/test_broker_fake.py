@@ -130,14 +130,14 @@ def test_successful_fractional_buy(env):
     r = order(env.client, notional=50, client_order_id="t-1", reason="test")
     assert r.status_code == 201, r.text
     o = r.json()
-    # NVDA ask 183.20 * 1.003 = 183.7496 -> 183.75; 50 / 183.75 = 0.27210... -> 0.2721
-    assert o["type"] == "limit" and o["limit_price"] == 183.75 and o["qty"] == 0.2721
+    # NVDA min(ask 183.20, last 183.15) * 1.003 = 183.6995 -> 183.70; 50 / 183.70 = 0.27218... -> 0.2721
+    assert o["type"] == "limit" and o["limit_price"] == 183.70 and o["qty"] == 0.2721
     assert o["notional"] == 50 and o["status"] == "filled" and o["filled_qty"] == 0.2721
-    assert o["filled_avg_price"] == 183.75 and o["broker_order_id"] and o["submitted_at"]
+    assert o["filled_avg_price"] == 183.70 and o["broker_order_id"] and o["submitted_at"]
     sent = env.backend.orders[o["broker_order_id"]]
-    assert sent["qty"] == 0.2721 and sent["limit_price"] == 183.75 and sent["client_order_id"] == "t-1"
+    assert sent["qty"] == 0.2721 and sent["limit_price"] == 183.70 and sent["client_order_id"] == "t-1"
     row = env.query("SELECT * FROM orders WHERE client_order_id='t-1'")[0]
-    assert row["filled_notional"] == pytest.approx(0.2721 * 183.75)
+    assert row["filled_notional"] == pytest.approx(0.2721 * 183.70)
     assert len(env.journal("order")) == 1 and len(env.journal("fill")) == 1
     pos = env.client.get("/positions", headers=H).json()
     assert pos[0]["symbol"] == "NVDA" and pos[0]["qty"] == 0.2721
@@ -225,7 +225,7 @@ def test_sell_what_we_hold(env):
     r = order(env.client, side="sell", notional=None, qty=o["filled_qty"])
     assert r.status_code == 201, r.text
     s = r.json()
-    assert s["limit_price"] == round(183.10 * 0.997, 2) and s["status"] == "filled"
+    assert s["limit_price"] == round(183.15 * 0.997, 2) and s["status"] == "filled"  # max(bid, last) * 0.997
     assert env.client.get("/positions", headers=H).json() == []
 
 

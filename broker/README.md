@@ -52,9 +52,11 @@ Caps 8 to 11 apply to buys. "Deployed" is net filled notional from our own order
 unfilled part of open buys. The daemon reconciles open orders from the backend before
 every order, so the caps use fresh fills.
 
-Orders are always `limit`, `day`, never extended hours. Buy limit = ask × (1 + slippage%),
-sell limit = bid × (1 − slippage%), rounded to cents. A notional request becomes
-`qty = floor(notional / limit, qty_decimals)`.
+Orders are always `limit`, `day`, never extended hours. Buy limit = (1 + slippage%) × the lower of
+the ask and the last trade; sell limit = (1 − slippage%) × the higher of the bid and the last trade,
+rounded to cents. The last trade is in the formula because the free IEX quote can sit several percent
+off the national market (6% seen on AMD/TSM at the open); on a tight market it changes nothing.
+A notional request becomes `qty = floor(notional / limit, qty_decimals)`.
 
 ## Tests
 

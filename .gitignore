@@ -10,3 +10,5 @@ config/broker.env
 *.log
 .pytest_cache/
 config/trader.env
+data/testday/
+.claude/

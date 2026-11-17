@@ -54,12 +54,22 @@ def floor_to(x: float, decimals: int) -> float:
 
 
 def limit_price(side: str, quote: Mapping[str, Any], slippage_pct: float) -> Optional[float]:
-    """Marketable limit: buy at ask*(1+s), sell at bid*(1-s), rounded to cents."""
-    ref = quote.get("ask") if side == "buy" else quote.get("bid")
-    if not ref or ref <= 0:
+    """Marketable limit, rounded to cents.
+
+    Buy: (1 + s) x the LOWER of the ask and the last trade. Sell: (1 - s) x the HIGHER of the
+    bid and the last trade. On a tight market the quote and the last trade agree, so this is
+    the plain ask/bid + slippage. On the free IEX feed the quoted side can sit several percent
+    away from the national market (seen 6% on AMD and TSM at 10:00 ET), which would turn a
+    0.3% slippage allowance into 6%; anchoring on the last trade keeps the allowance honest.
+    Alpaca still fills at the national best price, so a tighter limit costs nothing when the
+    market is normal and simply does not fill when it is not. No positive reference -> None."""
+    quoted = quote.get("ask") if side == "buy" else quote.get("bid")
+    refs = [float(x) for x in (quoted, quote.get("last")) if x and float(x) > 0]
+    if not refs:
         return None
+    ref = min(refs) if side == "buy" else max(refs)
     factor = 1 + slippage_pct / 100 if side == "buy" else 1 - slippage_pct / 100
-    return round(float(ref) * factor, 2)
+    return round(ref * factor, 2)
 
 
 def sizing(req: OrderReq, ctx: Mapping[str, Any]) -> Optional[Sizing]:
