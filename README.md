@@ -1,6 +1,7 @@
 # Thesis Trader
 
-Personal thesis-driven trading agent on Alpaca paper. Claude Code is the brain, the scripts
+Personal thesis-driven trading agent on Alpaca paper. Claude Code (or a local Ollama model,
+`LLM_BACKEND`) is the brain, the scripts
 in `tools/` are the hands, the `broker/` daemon is the only thing that can place an order,
 and Qwen does the cheap text work. Full design: `docs/brief.md`.
 
@@ -17,7 +18,10 @@ tools/       CLI scripts Claude Code runs: quote, positions, thesis_*, run_thesi
 strategies/  strategy families: pure signals() per spec strategy.type (dca, momentum), shared caps,
              and the backtester (backtest.py)
 scheduler/   tick.py (every 15 min, market hours), nightly.py (incl. the bars update), weekly
-             review timer, systemd units, install scripts, doctor.py health check
+             review timer, systemd units, install scripts, cron_loop.py (the same schedule
+             without systemd), doctor.py health check
+deploy/      Docker Compose: one image, broker/web/scheduler services, optional Traefik overlay,
+             switch.sh (systemd <-> docker)
 web/         phone dashboard + chat over Tailscale, approve/reject endpoints for ntfy buttons
 trader/      shared library: config, db schema, thesis spec, scheduling math, broker client, notify
 data/        trader.db (SQLite) and the HALT kill-switch file
@@ -29,21 +33,63 @@ tests/       pytest; the broker has a fake backend so the whole chain runs witho
 ## Setup on a fresh machine (paper)
 
 ```sh
-git clone <repo> tracker && cd tracker
-./setup.sh                       # venv, requirements, config/trader.env with fresh tokens, runs the tests
+git clone git@github.com:sujaybh/brain-trader.git tracker && cd tracker
+./setup.sh                       # venv, requirements, config files with fresh tokens, runs the tests
 $EDITOR config/alpaca.env        # paste paper keys from the Alpaca dashboard (Paper Trading -> API keys)
-scheduler/install-user.sh        # user systemd units: broker, web, tick/nightly/weekly-review timers (no sudo)
-.venv/bin/python scheduler/doctor.py   # read-only health check of units, broker, Ollama, claude, DB
-.venv/bin/python tools/positions.py
 ```
 
-Then subscribe the ntfy app to the topic `setup.sh` printed, and open the dashboard URL it
-printed in Safari (Share -> Add to Home Screen). The phone must be on the same tailnet.
+Then start it **one** of two ways (never both on a machine; `deploy/switch.sh status` says which is live):
 
-Hardened variant: `sudo scheduler/install.sh` creates a `thesis` system user that alone can
-read the keys (moved to `/etc/thesis-trader/alpaca.env`) and runs the units system-wide.
+| | systemd | Docker Compose |
+|---|---|---|
+| start | `scheduler/install-user.sh` | `deploy/switch.sh docker` |
+| jobs | timers: tick, nightly, weekly review | `scheduler/cron_loop.py` in the `scheduler` container |
+| broker | 127.0.0.1:8787 | internal network only, no published port |
+| web | `WEB_HOST:8010` | `WEB_BIND:8010` (default 127.0.0.1), or behind Traefik |
+| chat / reviews | Claude CLI or Ollama (`LLM_BACKEND`) | Ollama (no Claude CLI in the image) |
+| run a tool | `.venv/bin/python tools/positions.py` | `docker compose -f deploy/docker-compose.yml exec scheduler python tools/positions.py` |
+| docs | `scheduler/README.md` | `deploy/README.md` |
+
+`.venv/bin/python scheduler/doctor.py` is the read-only health check for either mode (units or
+containers, broker, Ollama, DB, last runs) and fails if both modes are active.
+
+`setup.sh` prints the ntfy topic to subscribe to and the dashboard URL (Safari: Share -> Add to
+Home Screen). The phone must be on the same tailnet. `WEB_BASIC_AUTH=user:password` adds HTTP
+Basic auth on top of the token.
+
+Hardened systemd variant: `sudo scheduler/install.sh` creates a `thesis` system user that alone
+can read the keys (moved to `/etc/thesis-trader/alpaca.env`) and runs the units system-wide.
 Nothing in the repo hard-codes a path or a host: the unit files use `__ROOT__`, rendered by
 the installers; `WEB_URL` and `OLLAMA_URL` live in `config/trader.env`, which is gitignored.
+
+## Moving to a server (Docker + Traefik, Tailscale only)
+
+Only one machine may run against the same Alpaca keys, so the old one is stopped first.
+
+```sh
+# 1. old machine, market closed: stop everything, flush the DB, copy state across
+deploy/switch.sh status
+systemctl --user disable --now thesis-tick.timer thesis-nightly.timer thesis-review.timer thesis-broker thesis-web
+.venv/bin/python -c "import sqlite3; sqlite3.connect('data/trader.db').execute('PRAGMA wal_checkpoint(TRUNCATE)')"
+rsync -av config/alpaca.env config/trader.env SERVER:tracker/config/      # after cloning there
+rsync -av data/trader.db SERVER:tracker/data/
+
+# 2. server
+git clone git@github.com:sujaybh/brain-trader.git tracker && cd tracker && mkdir -p data
+$EDITOR config/trader.env        # WEB_URL=https://<host the phone opens>, WEB_BASIC_AUTH=user:password,
+                                 # OLLAMA_URL / OLLAMA_FALLBACK_* reachable from a container
+cp deploy/.env.example deploy/.env && $EDITOR deploy/.env
+                                 # TRADER_HOST, TRAEFIK_NETWORK, TRAEFIK_ENTRYPOINT, TRAEFIK_TLS, and
+                                 # COMPOSE_FILES="deploy/docker-compose.yml deploy/docker-compose.traefik.yml"
+deploy/switch.sh docker          # builds and starts broker, web, scheduler
+docker compose -f deploy/docker-compose.yml ps                                    # three healthy
+docker compose -f deploy/docker-compose.yml exec scheduler python tools/positions.py
+```
+
+Without Traefik, leave `COMPOSE_FILES` unset and set `WEB_BIND` to the server's tailnet IP.
+Old notifications keep pointing at the old machine; approve or reject pending proposals from the
+new dashboard. Rollback: `docker compose -p thesis down` on the server, copy `data/trader.db`
+back, `scheduler/install-user.sh` on the old machine. Full detail: `deploy/README.md`.
 
 Step 0 is done when one `tools/order.py --side buy --symbol SPY --notional 5` fills during
 market hours and the phone buzzes.

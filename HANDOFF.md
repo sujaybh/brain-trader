@@ -46,7 +46,7 @@ play, what to do next, and the feature backlog. Delete sections when they stop b
 | LLM | Claude CLI or Ollama | Ollama only (no Claude CLI in the image) |
 | health | `scheduler/doctor.py` (auto-detects the mode; FAILs if both are active) | same |
 
-**Server with Traefik (Tailscale only):** copy `config/alpaca.env`, `config/trader.env`,
+**Server with Traefik (Tailscale only)** (step by step in README.md, "Moving to a server"): copy `config/alpaca.env`, `config/trader.env`,
 `config/limits.json` and `data/trader.db`; `cp deploy/.env.example deploy/.env` and set
 `TRADER_HOST`, `TRAEFIK_NETWORK`, `TRAEFIK_ENTRYPOINT`, `WEB_URL=https://<host>` (what the
 phone opens; ntfy buttons are built from it) and `WEB_BASIC_AUTH=user:password`; then
