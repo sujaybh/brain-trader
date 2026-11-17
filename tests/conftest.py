@@ -14,6 +14,8 @@ os.environ["TRADER_DATA_DIR"] = tempfile.mkdtemp(prefix="trader-test-")
 os.environ["BROKER_TOKEN"] = "test-token"
 os.environ["BROKER_BACKEND"] = "fake"
 os.environ["NTFY_TOPIC"] = ""
+os.environ["BROKER_WAIT_S"] = "0"   # scheduled-job waits: never sleep in tests unless a test asks
+os.environ["OLLAMA_WAIT_S"] = "0"
 for k in ("FAKE_CASH", "FAKE_MARKET_OPEN", "FAKE_PARTIAL_FILL", "FAKE_AUTO_FILL"):
     os.environ.pop(k, None)
 

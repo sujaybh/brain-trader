@@ -14,6 +14,11 @@ EnvironmentFile=/etc/thesis-trader/alpaca.env
 EnvironmentFile=-__ROOT__/config/trader.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=__ROOT__/.venv/bin/python -m broker
+# Type=simple counts as started at fork; this makes the unit `active` only once GET /health
+# answers, so units ordered After= it never race the listener at boot. A timeout fails the
+# start and Restart= tries again.
+ExecStartPost=__ROOT__/.venv/bin/python __ROOT__/scheduler/wait_broker.py --timeout 60
+TimeoutStartSec=90
 Restart=always
 RestartSec=5
 # data/ is shared with anomander through the thesis group: keep new files group-writable.

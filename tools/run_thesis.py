@@ -95,6 +95,10 @@ def run_thesis(thesis_id: str, *, now: datetime | None = None, dry_run: bool = F
                     db.journal(conn, "expired", f"slot {key} expired: not executed within {catchup:g}h",
                                thesis_id=thesis_id, data={"slot": key, "catchup_hours": catchup})
                     db.set_setting(conn, _done_key(thesis_id, key), "expired")
+                    # once per slot: the slot_done key above means it is never seen again
+                    N.push(f"DCA slot {key} of {thesis_id} expired: not run within {catchup:g}h "
+                           f"(machine off or asleep?). Place it by hand with tools/order.py if you want it.",
+                           title=f"Slot expired: {thesis_id}", tags=["hourglass"], priority=4, conn=conn)
     if not dry_run and (prev_s is None or now > prev):
         db.set_setting(conn, tick_key, now.astimezone(timezone.utc).isoformat(timespec="seconds"))
 

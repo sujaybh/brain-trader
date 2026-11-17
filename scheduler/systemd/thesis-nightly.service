@@ -1,7 +1,9 @@
 [Unit]
 Description=Thesis Trader nightly: reconcile, snapshot, news, triggers
-After=thesis-broker.service
-Wants=thesis-broker.service
+# network for the news feeds; ollama.service is ordered only if it exists on this machine
+# (local Ollama). The job itself also waits for the broker (BROKER_WAIT_S) and Ollama (OLLAMA_WAIT_S).
+After=thesis-broker.service network-online.target ollama.service
+Wants=thesis-broker.service network-online.target
 
 [Service]
 Type=oneshot

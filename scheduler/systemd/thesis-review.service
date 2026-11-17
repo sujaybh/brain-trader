@@ -1,0 +1,19 @@
+[Unit]
+Description=Thesis Trader weekly review: Claude reviews every thesis whose review cadence is due
+After=thesis-broker.service network-online.target
+Wants=thesis-broker.service network-online.target
+
+[Service]
+Type=oneshot
+User=anomander
+SupplementaryGroups=thesis
+UMask=0002
+WorkingDirectory=__ROOT__
+EnvironmentFile=-__ROOT__/config/trader.env
+# `claude` must be found without a login shell's PATH: web/chat.py claude_bin() tries
+# CLAUDE_BIN (set it in config/trader.env), ~/.local/bin/claude and other standard install
+# locations. The PATH below also covers an npm install that needs `node`.
+Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=__ROOT__/.venv/bin/python __ROOT__/tools/review.py --all
+# up to 10 min per due thesis
+TimeoutStartSec=2h

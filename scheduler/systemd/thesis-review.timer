@@ -1,0 +1,13 @@
+[Unit]
+Description=Thesis Trader weekly review, Saturdays 10:00 America/New_York
+
+[Timer]
+# review.py --all only reviews theses whose cadence (weekly/monthly/quarterly) is due, so a
+# weekly timer serves every cadence. Persistent: a Saturday missed while off runs on boot.
+OnCalendar=Sat *-*-* 10:00:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=thesis-review.service
+
+[Install]
+WantedBy=timers.target

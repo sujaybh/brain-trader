@@ -12,9 +12,10 @@
 #      chown thesis:thesis + chmod 600.
 #   4. Makes data/ owned by group `thesis`, setgid, group-writable, so the broker (thesis) and the
 #      tools/scheduler/web (anomander) share the SQLite DB.
-#   5. Renders scheduler/systemd/*.service|*.timer (with __ROOT__ = this checkout) into
-#      /etc/systemd/system/, daemon-reload,
-#      enables+starts thesis-broker and thesis-web, enables+starts the tick and nightly timers.
+#   5. Renders every scheduler/systemd/*.service|*.timer with scheduler/render-units.sh (system
+#      flavor: __ROOT__ = this checkout, User= the checkout owner) into /etc/systemd/system/,
+#      daemon-reload, enables+starts thesis-broker and thesis-web and every timer (tick,
+#      nightly, review); restarts broker/web only if their unit file changed.
 # Undo with scheduler/uninstall.sh.
 set -euo pipefail
 
@@ -25,8 +26,12 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OWNER="$(stat -c %U "$ROOT")"
-UNITS=(thesis-broker.service thesis-tick.service thesis-tick.timer thesis-nightly.service thesis-nightly.timer thesis-web.service)
 echo "Project root: $ROOT (owner: $OWNER)"
+OWNER_HOME="$(getent passwd "$OWNER" | cut -d: -f6)"
+if [[ -f "$OWNER_HOME/.config/systemd/user/thesis-broker.service" ]]; then
+  echo "WARNING: user units from install-user.sh exist for $OWNER. Disable them first, or two brokers" >&2
+  echo "         and two schedulers will run: sudo -u $OWNER scheduler/uninstall.sh --user" >&2
+fi
 
 
 # 1. user + group
@@ -72,13 +77,29 @@ chmod 2775 "$ROOT/data"
 find "$ROOT/data" -type f -exec chmod g+rw {} +
 
 # 5. units
-for u in "${UNITS[@]}"; do
-  sed -e "s|__ROOT__|$ROOT|g" -e "s|^User=anomander|User=$OWNER|" "$ROOT/scheduler/systemd/$u" > "/etc/systemd/system/$u"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+"$ROOT/scheduler/render-units.sh" system "$TMP" "$OWNER"
+CHANGED=()
+TIMERS=()
+for f in "$TMP"/*; do
+  u="$(basename "$f")"
+  [[ "$u" == *.timer ]] && TIMERS+=("$u")
+  if ! cmp -s "$f" "/etc/systemd/system/$u"; then
+    install -m 644 "$f" "/etc/systemd/system/$u"
+    CHANGED+=("$u")
+  fi
 done
+echo "units updated: ${CHANGED[*]:-none}"
 systemctl daemon-reload
 systemctl enable --now thesis-broker.service
-systemctl enable --now thesis-tick.timer thesis-nightly.timer
+systemctl enable --now "${TIMERS[@]}"
 systemctl enable --now thesis-web.service
+for svc in thesis-broker.service thesis-web.service; do
+  if printf '%s\n' "${CHANGED[@]}" | grep -qx "$svc"; then
+    systemctl try-restart "$svc" && echo "restarted $svc (unit changed)"
+  fi
+done
 
 cat <<NEXT
 
@@ -91,4 +112,5 @@ Installed. Next steps:
   4. See the schedule:         systemctl list-timers 'thesis-*'
   5. Run a tick by hand:       sudo systemctl start thesis-tick.service && journalctl -u thesis-tick -n 50
   6. Log out and back in so your shell picks up the 'thesis' group (needed to write data/).
+  7. Health check:             .venv/bin/python scheduler/doctor.py
 NEXT

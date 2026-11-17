@@ -130,6 +130,7 @@ class FakeResp:
 def feeds(monkeypatch):
     monkeypatch.setattr(news, "fetch_feed", lambda url, src: [dict(h) for h in HEADS] if "yahoo" in url else [])
     monkeypatch.setattr(news, "merge_headlines", lambda lists, since, limit, now=None: [h for l in lists for h in l][:limit])
+    monkeypatch.setattr(news, "wait_for_ollama", lambda timeout=None: config.OLLAMA_URL)
 
 
 def test_run_digests_stores_and_journals(feeds, monkeypatch):
@@ -172,6 +173,9 @@ def test_run_falls_back_and_survives_malformed(feeds, monkeypatch):
     assert e["overall"] is None and any("digest failed" in x for x in e["errors"])
     conn = db.connect()
     assert db.row(conn, "SELECT COUNT(*) n FROM news WHERE sentiment IS NULL")["n"] == 3  # stored raw
+    # the only symbol failed its digest: a failure, not a "no digest" news row
+    assert out["ok"] is False and "every digest failed" in out["reason"]
+    assert db.row(conn, "SELECT COUNT(*) n FROM journal WHERE kind='news'")["n"] == 0
 
 
 def test_no_digest_writes_nothing(feeds, monkeypatch):

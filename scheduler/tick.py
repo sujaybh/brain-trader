@@ -10,22 +10,44 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import argparse  # noqa: E402
 import json  # noqa: E402
 import traceback  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
 
 from tools import _common as C  # noqa: E402
 from tools.run_thesis import run_thesis  # noqa: E402
 from trader import db  # noqa: E402
+from trader.client import BrokerError, wait_for_broker  # noqa: E402
 
 
 def tick(now=None, dry_run=False, conn=None, client=None) -> tuple[dict, int]:
     conn = conn or C.connect()
     clock_cache: dict = {}  # /clock is fetched at most once, and only if some slot is pending
     out = {"ok": True, "results": [], "crashed": []}
-    client_box = {"c": client}
+    client_box = {"c": client, "unready": None}
 
     def get_client():
+        # The broker is only contacted when there is work (open orders or a pending slot). The
+        # first time, wait (bounded, BROKER_WAIT_S) for /health: at boot the timer can fire
+        # before the broker listens. If it never comes up: one journaled error, no retries.
+        if client_box["unready"]:
+            raise BrokerError(0, client_box["unready"])
         if client_box["c"] is None:
-            client_box["c"] = C.broker()
+            c = C.broker()
+            if not dry_run:
+                ok, why = wait_for_broker("tick", conn=conn, client=c)
+                if not ok:
+                    client_box["unready"] = why
+                    out["broker_unready"] = why
+                    raise BrokerError(0, why)
+            client_box["c"] = c
         return client_box["c"]
+
+    def journal_error(msg, **kw):
+        if client_box["unready"]:
+            return  # already journaled once by wait_for_broker
+        try:
+            db.journal(conn, "error", msg, **kw)
+        except Exception:  # noqa: BLE001
+            pass
 
     # Fills arrive asynchronously. Reconcile at every tick when we have open orders so a fill
     # is journaled and pushed within 15 minutes, not at the next DCA slot or the nightly job.
@@ -35,10 +57,7 @@ def tick(now=None, dry_run=False, conn=None, client=None) -> tuple[dict, int]:
             out["reconcile"] = get_client().reconcile().get("updated", 0)
         except Exception as e:  # noqa: BLE001
             out["reconcile_error"] = f"{type(e).__name__}: {e}"
-            try:
-                db.journal(conn, "error", f"tick reconcile failed: {e}")
-            except Exception:  # noqa: BLE001
-                pass
+            journal_error(f"tick reconcile failed: {e}")
 
     for r in C.list_theses(conn, ("active",)):
         try:
@@ -50,16 +69,15 @@ def tick(now=None, dry_run=False, conn=None, client=None) -> tuple[dict, int]:
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             out["crashed"].append({"thesis": r["id"], "error": f"{type(e).__name__}: {e}"})
-            try:
-                db.journal(conn, "error", f"tick failed for {r['id']}: {e}", thesis_id=r["id"])
-            except Exception:  # noqa: BLE001
-                pass
+            journal_error(f"tick failed for {r['id']}: {e}", thesis_id=r["id"])
     if "clock" in clock_cache:
         out["clock"] = clock_cache["clock"]
     out["placed"] = sum(x["placed"] for x in out["results"])
     out["refused"] = sum(x["refused"] for x in out["results"])
-    out["ok"] = not out["crashed"]
-    return out, (0 if not out["crashed"] else 2)
+    out["ok"] = not out["crashed"] and not out.get("broker_unready")
+    if out["ok"] and not dry_run:
+        db.set_setting(conn, "job_ok:tick", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    return out, (0 if out["ok"] else 2)
 
 
 class _Lazy:

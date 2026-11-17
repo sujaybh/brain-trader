@@ -184,6 +184,28 @@ def ask_model(prompt: str) -> tuple[str, str]:
     return config.OLLAMA_FALLBACK_MODEL, call_ollama(config.OLLAMA_FALLBACK_URL, config.OLLAMA_FALLBACK_MODEL, prompt)
 
 
+def wait_for_ollama(timeout: float | None = None, interval: float = 5.0) -> str | None:
+    """Poll GET /api/tags on the primary, then the fallback Ollama until one answers or
+    `timeout` (config.OLLAMA_WAIT_S, 60 s) passes. Right after boot the nightly job can start
+    before Ollama is serving. Returns the URL that answered, or None (digests will then fail
+    and be reported as such)."""
+    timeout = config.OLLAMA_WAIT_S if timeout is None else timeout
+    deadline = time.monotonic() + max(timeout, 0)
+    urls = [u for u in dict.fromkeys((config.OLLAMA_URL, config.OLLAMA_FALLBACK_URL)) if u]
+    while True:
+        for u in urls:
+            try:
+                requests.get(f"{u.rstrip('/')}/api/tags", timeout=3).raise_for_status()
+                return u
+            except requests.RequestException:
+                pass
+        left = deadline - time.monotonic()
+        if left <= 0:
+            log(f"no Ollama answered at {', '.join(urls)} within {timeout:g}s")
+            return None
+        time.sleep(min(interval, left))
+
+
 def _words(s, n: int) -> str:
     w = str(s or "").split()
     return " ".join(w[:n]) + ("…" if len(w) > n else "")
@@ -370,6 +392,8 @@ def run(symbols: list[str], since: timedelta, limit: int, digest: bool, triggers
         for sym, (heads, errors) in fetched.items():
             result["symbols"][sym] = {"overall": None, "items": heads, **({"errors": errors} if errors else {})}
         return result
+    if any(h for h, _ in fetched.values()):
+        result["ollama"] = wait_for_ollama()
     conn = connect()
     try:
         models = set()
@@ -392,6 +416,12 @@ def run(symbols: list[str], since: timedelta, limit: int, digest: bool, triggers
             result["symbols"][sym] = entry
         result["model"] = ", ".join(sorted(models)) or None
         summary = {s: v["overall"] for s, v in result["symbols"].items()}
+        failure = _total_failure(fetched, result["symbols"])
+        if failure:
+            # Not a news day of "no digest" x N: report failure (nightly journals it as an error)
+            result.update(ok=False, reason=failure, flagged=[])
+            log(failure)
+            return result
         flagged = [s for s, o in summary.items() if o and o.get("flag")]
         msg = "; ".join(f"{s}: {o['sentiment']} — {o['summary']}" if o else f"{s}: no digest"
                         for s, o in summary.items())
@@ -404,6 +434,19 @@ def run(symbols: list[str], since: timedelta, limit: int, digest: bool, triggers
     finally:
         conn.close()
     return result
+
+
+def _total_failure(fetched: dict, entries: dict) -> str | None:
+    """-> a reason when the run produced nothing usable: every symbol that had headlines failed
+    its digest, or every feed failed for every symbol. None for a normal (or partly failed) run."""
+    with_heads = [s for s, (h, _) in fetched.items() if h]
+    if with_heads and not any(entries[s].get("overall") for s in with_heads):
+        first = next((e for s in with_heads for e in entries[s].get("errors", []) if e.startswith("digest failed")), "")
+        return (f"every digest failed ({len(with_heads)} symbol(s) with headlines; Ollama "
+                f"{config.OLLAMA_URL} / fallback {config.OLLAMA_FALLBACK_URL}): {first[:200]}")
+    if fetched and not with_heads and all(e for _, e in fetched.values()):
+        return f"every news feed failed for {', '.join(fetched)} (network down?)"
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -430,7 +473,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         out = run(syms, since, max(1, args.limit), not args.no_digest, not args.no_triggers)
         print(json.dumps(out, indent=2, default=str))
-        return 0
+        return 0 if out.get("ok", True) else 1
     except Exception as e:
         traceback.print_exc(file=sys.stderr)
         print(json.dumps({"ok": False, "reason": f"unexpected error: {type(e).__name__}: {e}"}, indent=2))
