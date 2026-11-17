@@ -46,7 +46,7 @@ if __name__ == "__main__" and (_VENV / "bin" / "python").exists() and Path(sys.p
 from croniter import croniter  # noqa: E402
 
 from trader import client as tclient  # noqa: E402
-from trader import config, notify  # noqa: E402
+from trader import config, llm, notify  # noqa: E402
 from trader.db import connect, deployed_by_thesis, get_setting, journal, qty_by_thesis, row, rows, set_setting  # noqa: E402
 from trader.schedule import client_order_id  # noqa: E402
 from trader.spec import ThesisSpec, describe  # noqa: E402
@@ -389,7 +389,7 @@ def parse_answer(out: dict | None, text: str) -> dict:
         try:
             a = json.loads(text)
         except (TypeError, ValueError):
-            raise ReviewError("no structured output in claude's reply")
+            raise ReviewError("no structured output in the model's reply")
     if not isinstance(a, dict):
         raise ReviewError("structured output is not an object")
     rec = str(a.get("recommendation", "")).strip().upper()
@@ -424,6 +424,38 @@ def _propose(conn, thesis_id: str, answer: dict) -> tuple[dict | None, str | Non
     return p, f"Proposal #{p['id']} ({p['status']}): {p['summary']}"
 
 
+def run_ollama(pack: str, instructions: str) -> tuple[bool, str, dict | None]:
+    """The review on Ollama: one structured-output call (REVIEW_SCHEMA as `format`), the review
+    instructions as the system message and the pack as the user message. Same return shape as
+    run_json, so the answer goes through the same parse_answer / usage / proposal path."""
+    model = config.ollama_model("review")
+    messages = [{"role": "system", "content": instructions + "\nReply with the JSON object only."},
+                {"role": "user", "content": pack}]
+    tokens = [0, 0, 0]
+    text, name = "", model
+    for attempt in range(2):
+        try:
+            r = llm.ollama_chat(messages, model=model, format=REVIEW_SCHEMA, timeout=TIMEOUT_S)
+        except llm.LLMError as e:
+            return False, str(e), None
+        text, name = r["message"].get("content") or "", r["model"]
+        tokens = [tokens[0] + r["prompt_tokens"], tokens[1] + r["eval_tokens"], tokens[2] + r["duration_ms"]]
+        try:
+            answer = json.loads(text)
+        except ValueError:
+            answer = None
+        if isinstance(answer, dict) or attempt:
+            break
+        # some models (qwen3.5 measured) ignore `format` and answer in prose: ask once more
+        messages += [{"role": "assistant", "content": text},
+                     {"role": "user", "content": "That was not a JSON object. Reply again with only the JSON object "
+                      "described above (recommendation, lines, proposal), no other text."}]
+    out = llm.usage_doc(name, *tokens[:2], tokens[2])
+    if isinstance(answer, dict):
+        out["structured_output"] = answer
+    return bool(text), text or "empty reply from Ollama", out
+
+
 def review_one(conn, thesis_id: str, trigger=None, pack_only: bool = False, force: bool = False) -> dict:
     pack, positions, spec = _build(conn, thesis_id, trigger)
     if pack_only:
@@ -437,9 +469,17 @@ def review_one(conn, thesis_id: str, trigger=None, pack_only: bool = False, forc
         set_setting(conn, f"last_review:{thesis_id}", now)
         log(f"{thesis_id}: nothing changed since {last['ts'] if last else '?'}; skipped")
         return {"ok": True, "thesis": thesis_id, "skipped": True, "review": "skipped: nothing changed"}
-    log(f"running claude for {thesis_id} ({len(pack)} chars of context; {'; '.join(changes) or 'forced'})")
-    ok, text, out = run_json(pack + "\n" + INSTRUCTIONS.format(bench=BENCHMARK, max_lines=MAX_LINES),
-                             timeout=TIMEOUT_S, caller="review", json_schema=REVIEW_SCHEMA)
+    instructions = INSTRUCTIONS.format(bench=BENCHMARK, max_lines=MAX_LINES)
+    try:
+        backend = config.llm_backend("review")
+    except ValueError as e:
+        return {"ok": False, "thesis": thesis_id, "reason": str(e)}
+    log(f"running {backend} for {thesis_id} ({len(pack)} chars of context; {'; '.join(changes) or 'forced'})")
+    if backend == "ollama":
+        ok, text, out = run_ollama(pack, instructions)
+    else:
+        ok, text, out = run_json(pack + "\n" + instructions, timeout=TIMEOUT_S, caller="review",
+                                 json_schema=REVIEW_SCHEMA)
     usage = record_usage(conn, "review", out, ok)
     answer = None
     if ok:

@@ -106,3 +106,55 @@ written to the `claude_usage` table. `tools/usage.py` sums them for today / 7d /
 and by model; the dashboard shows the 7-day figure. Set `CLAUDE_BUDGET_USD_WEEK` to get a
 percentage against a budget. The plan's real remaining allowance is only visible with `/usage`
 in the CLI or on claude.ai; this table tells you what the scripts have been spending.
+
+## Ollama backend (no Claude login)
+
+`LLM_BACKEND=ollama` in `config/trader.env` runs chat and reviews on Ollama instead of the Claude
+Code CLI, so a Docker deployment needs no Claude login. `LLM_BACKEND_CHAT` / `LLM_BACKEND_REVIEW`
+override it per caller (e.g. reviews on Claude, chat on Ollama); an unknown value is a clear error
+at use. Models: `OLLAMA_CHAT_MODEL` / `OLLAMA_REVIEW_MODEL`, default `OLLAMA_MODEL`. Requests go to
+`OLLAMA_URL`, then `OLLAMA_FALLBACK_URL` / `OLLAMA_FALLBACK_MODEL` if the primary is down;
+`OLLAMA_NUM_CTX` (16384) sets the context window, because Ollama's own default (4096) silently
+truncates a review pack. Both local models tested (qwen3-coder:30b, qwen3.5 9.7B) support native tool
+calling and `think: false`; a model that rejects `think` is retried without it.
+
+Reviews: one call with `REVIEW_SCHEMA` as the structured-output `format` (instructions as system
+message, the pack as user message), then the same validation and proposal path as the Claude
+path. Proposals from a review are still always `confirm`.
+
+Chat (`web/ollama_chat.py`): an in-process tool loop, no session, history = the last 12 chat
+rows. The model has one function, `run_tool(name, args, stdin)`, which runs `tools/<name>.py`
+without a shell (60 s timeout, output cut at 6k chars, at most 8 tool steps per message). The
+limits are enforced in code, not by the prompt, and are stricter than with Claude:
+
+- Allowed: positions, journal, quote, thesis_list, thesis_show, usage, news (`--no-digest` only),
+  backtest, propose, thesis_create, thesis_pause (override with `CHAT_TOOLS_OLLAMA`, comma list).
+- Always refused, whatever the override says: `order.py` (a trade is a `propose.py` request that needs
+  your phone tap; chat adds `--force-confirm`, so even a thesis in mode `auto` waits for the tap),
+  `halt.py`, `thesis_resume` (resume only as a proposal), scheduled/maintenance scripts, names
+  that are not `^[a-z_]+$` or start with `_`.
+- `thesis_create`: `--dry-run` always runs; a real create needs the identical spec (compared
+  after validation) to have been dry-run in an earlier user message, i.e. you saw the read-back
+  and replied. It is single use. The spec is handed back to the model on the next turn so it
+  can resend it unchanged.
+- Every tool call, allowed or refused, is journaled as kind `chat_tool`.
+
+Usage lands in `claude_usage` as `ollama:<model>` with real token counts and cost 0;
+`tools/usage.py` shows them next to Claude's and lists the backend per caller.
+
+Quality, measured on a fake-broker temp database (not production data):
+
+- qwen3-coder:30b (primary host): tool calling works. "What theses do we have?" took one tool call
+  and ~8-16 s; thesis creation took a dry-run, a read-back and, after a reply, the real create (~10 s
+  and ~25 s per message, ~4k prompt tokens each). It often invents spec details (id, name, rationale,
+  review cadence, "SPY" for the manual thesis) and at first dropped the `-` argument or retyped the
+  spec between dry-run and create; the guard refused those, so the code now adds the `-`, hands
+  the dry-run spec back to the model, and names the differing fields in a refusal. Reviews: valid
+  structured output in ~6 s, but generic ("no data yet") on an empty thesis.
+- qwen3.5 9.7B (local fallback): tool calling works and the flow completed, but a message took 110-190 s
+  here, and for reviews it ignored the `format` schema and answered in prose (a second JSON-only
+  request is made once); a review did not finish within 9 minutes. Treat it as a fallback for
+  short chat, not as a reviewer.
+- Neither is Claude: expect shallower analysis and occasional made-up detail; always read the
+  spec read-back before saying yes. Money safety does not depend on the model (guard, limits and the
+  phone tap are all code).

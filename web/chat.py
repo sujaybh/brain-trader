@@ -1,4 +1,5 @@
-"""Chat with Claude Code from the phone, and the locked-down `claude -p` command line shared with
+"""Chat with Claude Code from the phone (or, with LLM_BACKEND_CHAT=ollama, with a local model through
+web/ollama_chat.py; send() picks the backend), and the locked-down `claude -p` command line shared with
 tools/review.py.
 
 Session: the session id from the `--output-format json` result is stored in
@@ -215,8 +216,8 @@ def record_usage(conn, caller: str, out: dict | None, ok: bool = True) -> dict |
     return row
 
 
-def _add(conn, role: str, content: str) -> None:
-    conn.execute("INSERT INTO chat(ts, role, content) VALUES (?,?,?)", (now_iso(), role, content))
+def _add(conn, role: str, content: str) -> int:
+    return int(conn.execute("INSERT INTO chat(ts, role, content) VALUES (?,?,?)", (now_iso(), role, content)).lastrowid)
 
 
 def history(conn, n: int = 30) -> list[dict]:
@@ -301,7 +302,13 @@ def send(conn, message: str) -> dict:
     message = (message or "").strip()
     if not message:
         return {"ok": False, "reason": "empty message"}
-    _add(conn, "user", message)
+    try:
+        backend = config.llm_backend("chat")
+    except ValueError as e:
+        return {"ok": False, "reason": str(e), "reply": str(e)}
+    row_id = _add(conn, "user", message)
+    if backend == "ollama":
+        return send_ollama(conn, row_id)
     session = get_setting(conn, SESSION_KEY)
     rotated = should_rotate(conn) if session else None
     ok, resumed = False, False
@@ -320,3 +327,17 @@ def send(conn, message: str) -> dict:
     _add(conn, "assistant" if ok else "error", text)
     return {"ok": ok, "reply": text, "session_id": sid, "resumed": resumed, "rotated": rotated,
             "cost_usd": (out or {}).get("total_cost_usd")}
+
+
+def send_ollama(conn, user_row_id: int) -> dict:
+    """The reply to chat row `user_row_id` from the in-process Ollama tool loop (web/ollama_chat.py).
+    Same return shape as the Claude path; no session, so resumed/rotated/session_id are empty."""
+    import time
+    from . import ollama_chat
+    from trader import llm
+    t0 = time.monotonic()
+    ok, text, st = ollama_chat.run(conn, user_row_id)
+    doc = llm.usage_doc(st["model"], st["prompt_tokens"], st["eval_tokens"], int((time.monotonic() - t0) * 1000), st["steps"])
+    record_usage(conn, "chat", doc, ok)
+    _add(conn, "assistant" if ok else "error", text)
+    return {"ok": ok, "reply": text, "session_id": None, "resumed": False, "rotated": None, "cost_usd": 0.0}

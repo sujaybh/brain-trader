@@ -43,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--action", required=True, help="action JSON, see above")
     ap.add_argument("--reason", required=True, help="why; shown on the phone")
     ap.add_argument("--expires", default="24h", help="how long the proposal stays open (e.g. 4h, 2d); default 24h")
+    ap.add_argument("--force-confirm", action="store_true",
+                    help="always wait for the phone tap, even if the thesis is in mode auto (used by the Ollama chat)")
     args = ap.parse_args(argv)
     try:
         try:
@@ -52,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
             return _out({"ok": False, "reason": f"bad argument: {e}"}, 1)
         conn = connect()
         try:
-            p = proposals.create(conn, args.thesis, action, args.reason, expires)
+            p = proposals.create(conn, args.thesis, action, args.reason, expires, force_confirm=args.force_confirm)
         except proposals.ProposalError as e:
             return _out({"ok": False, "reason": e.reason}, 1)
         finally:

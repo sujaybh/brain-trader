@@ -60,6 +60,10 @@ BROKER_BACKEND=fake .venv/bin/python -m broker &      # fake Alpaca, market alwa
 ## Day to day
 
 - Describe a thesis in chat. Claude compiles it, reads back one paragraph, you say yes.
+- Chat and reviews can run on Ollama instead of Claude (`LLM_BACKEND=ollama`, per caller
+  `LLM_BACKEND_CHAT` / `LLM_BACKEND_REVIEW`), so a Docker deployment needs no Claude login. Chat
+  then has a stricter code-level guard (no `order.py`, trades only as phone-tap proposals); see
+  `web/README.md`.
 - Every 15 minutes during market hours the tick timer executes any due DCA slot. If the
   laptop was asleep, the slot catches up within 48 hours and then expires.
 - Fills reach the phone within about a minute: the broker daemon checks its open orders every
