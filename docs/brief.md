@@ -31,7 +31,7 @@ So:
 
 **Qwen (local)** — news digest, headline tagging, journal summaries.
 
-**Claude Code** — thesis compilation, reviews, trigger decisions, chat.
+**Claude Code** — thesis compilation, reviews, trigger decisions, chat. Scripted `claude -p` runs are isolated from the user's own Claude setup (no MCP servers or account connectors, so nothing but the broker can reach a brokerage). Reviews are a single tool-free call with structured output; they can only propose.
 
 ## Hard limits (enforced in `broker/`, never in a prompt)
 

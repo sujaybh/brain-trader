@@ -49,6 +49,10 @@ BROKER_PORT = int(env("BROKER_PORT", "8787"))
 BROKER_URL = env("BROKER_URL", f"http://{BROKER_HOST}:{BROKER_PORT}")
 BROKER_TOKEN = env("BROKER_TOKEN", "")
 BROKER_BACKEND = env("BROKER_BACKEND", "alpaca")  # alpaca | fake
+# Scheduled jobs (tick, nightly, weekly review) wait this long for the broker's /health before
+# giving up with one journaled error; covers boot/wake when the timer fires before the broker
+# is listening. Interactive tools do not wait (they only get BrokerClient's short retries).
+BROKER_WAIT_S = float(env("BROKER_WAIT_S", "120") or 0)
 
 NTFY_URL = env("NTFY_URL", "https://ntfy.sh")
 NTFY_TOPIC = env("NTFY_TOPIC", "")
@@ -62,6 +66,9 @@ OLLAMA_URL = env("OLLAMA_URL", "http://100.64.0.6:11434")
 OLLAMA_MODEL = env("OLLAMA_MODEL", "qwen3-coder:30b")
 OLLAMA_FALLBACK_URL = env("OLLAMA_FALLBACK_URL", "http://127.0.0.1:11434")
 OLLAMA_FALLBACK_MODEL = env("OLLAMA_FALLBACK_MODEL", "qwen3.5:latest")
+# tools/news.py polls Ollama (primary, then fallback) for up to this long before digesting, so a
+# nightly run right after boot does not race the Ollama service.
+OLLAMA_WAIT_S = float(env("OLLAMA_WAIT_S", "60") or 0)
 
 # Claude Code (`claude -p`) is used by dashboard chat and tools/review.py. It runs on the
 # user's Claude subscription login, so the model pin matters for plan usage. Set
@@ -69,6 +76,17 @@ OLLAMA_FALLBACK_MODEL = env("OLLAMA_FALLBACK_MODEL", "qwen3.5:latest")
 # counts and list-price cost go to the claude_usage table; tools/usage.py sums them and
 # compares with CLAUDE_BUDGET_USD_WEEK (0 = no budget set).
 CLAUDE_MODEL = env("CLAUDE_MODEL", "sonnet")
+# Per-caller overrides; unset falls back to CLAUDE_MODEL ("" still means the CLI default).
+CLAUDE_MODEL_CHAT = env("CLAUDE_MODEL_CHAT")
+CLAUDE_MODEL_REVIEW = env("CLAUDE_MODEL_REVIEW")
+
+
+def claude_model(caller: str) -> str:
+    """Model for a scripted caller ('chat', 'review'): CLAUDE_MODEL_<CALLER>, else CLAUDE_MODEL."""
+    v = globals().get(f"CLAUDE_MODEL_{caller.upper()}")
+    return CLAUDE_MODEL if v is None else v
+
+
 CLAUDE_BUDGET_USD_WEEK = float(env("CLAUDE_BUDGET_USD_WEEK", "0") or 0)
 
 DEFAULT_LIMITS = {

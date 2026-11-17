@@ -196,9 +196,10 @@ def list_pending(conn) -> list[dict]:
 
 
 def create(conn, thesis_id: str, action: Any, reason: str, expires: timedelta = timedelta(hours=24),
-           approve_now: str | None = None) -> dict:
+           approve_now: str | None = None, force_confirm: bool = False) -> dict:
     """Insert a pending proposal. In confirm mode push Approve/Reject buttons; in auto mode
     approve and execute immediately (the same path a phone tap takes) and push the result.
+    `force_confirm=True` (Claude reviews) always asks for the tap, whatever the thesis mode.
     `approve_now="web"` is for actions the user initiated themselves (dashboard buttons): the
     tap is the approval, so skip the buttons and execute."""
     reason = (reason or "").strip()
@@ -207,6 +208,8 @@ def create(conn, thesis_id: str, action: Any, reason: str, expires: timedelta = 
     clean = validate_action(conn, thesis_id, action)
     thesis = load_thesis(conn, thesis_id)
     mode = thesis["mode"] if thesis else "confirm"
+    if force_confirm:
+        mode = "confirm"
     exp = (_now() + expires).isoformat(timespec="seconds")
     cur = conn.execute(
         "INSERT INTO proposals(thesis_id, action, reason, status, created, expires) VALUES (?,?,?,?,?,?)",

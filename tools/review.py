@@ -6,19 +6,26 @@ positions (reconciled from Alpaca) attributed to the thesis; P&L since creation 
 the snapshots table; journal since the last review; 7 days of news for the universe; the
 trigger payload; wash-sale warnings.
 
-Without --pack-only, runs `claude -p` (cwd = project root, so CLAUDE.md applies) with the pack
-and review instructions, journals the answer as kind=review and pushes a summary. Claude may
-only change things by calling tools/propose.py.
+Without --pack-only, runs one single-turn `claude -p` with no tools (the pack already holds the
+data) and --json-schema structured output:
+  {"recommendation": "HOLD|CHANGE|EXIT", "lines": ["..."], "proposal": null | {"action": {...}, "reason": "..."}}
+The answer is validated here, journaled as kind=review and pushed. A proposal (CHANGE/EXIT only)
+is created by this script through web/proposals.create, the same path tools/propose.py uses, so
+the phone gets Approve/Reject (or, for a thesis in mode auto, it executes as propose.py would).
+Claude cannot run anything during a review: it can only propose.
+
+Skipping: if nothing material happened since the last real review (see material_changes and the
+SKIP_* constants), no Claude call is made; a kind=review "skipped: nothing changed" entry is
+journaled and the cadence clock restarts. --force always runs Claude.
 
 --all reviews every active thesis whose review cadence is due (settings key last_review:<id>).
 Prints one JSON document (--raw prints the bare markdown pack instead, with --pack-only).
-Exit 0 ok, 1 refusal (unknown thesis, claude failed), 2 unexpected error.
+Exit 0 ok (reviewed or skipped), 1 refusal (unknown thesis, claude failed), 2 unexpected error.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import os
 import sys
 import traceback
@@ -41,33 +48,77 @@ from croniter import croniter  # noqa: E402
 from trader import client as tclient  # noqa: E402
 from trader import config, notify  # noqa: E402
 from trader.db import connect, deployed_by_thesis, get_setting, journal, qty_by_thesis, row, rows, set_setting  # noqa: E402
+from trader.schedule import client_order_id  # noqa: E402
 from trader.spec import ThesisSpec, describe  # noqa: E402
-from web.chat import claude_cmd, record_usage  # noqa: E402
+from web import proposals  # noqa: E402
+from web.chat import record_usage, run_json  # noqa: E402
 
 TIMEOUT_S = 600
 CADENCE_DAYS = {"weekly": 7, "monthly": 30, "quarterly": 91}
 BENCHMARK = "SPY"
+PROPOSAL_EXPIRES = timedelta(hours=24)  # same default as tools/propose.py
+
+# Skip rule: a scheduled review is skipped (no Claude call) unless, since the last review that
+# actually ran, at least one of these happened for the thesis:
+#   - a journal entry of a SKIP_MATERIAL_KINDS kind (orders, fills, refusals, fired triggers,
+#     proposals, spec/status changes). Orders and fills of the thesis's own scheduled DCA slots
+#     are routine and do not count (a refusal during a slot still does);
+#   - a news digest flagged a universe symbol;
+#   - a held symbol's price moved SKIP_PRICE_MOVE_PCT or more from the price recorded at that
+#     review (a held symbol with no recorded or no current price counts as moved);
+#   - the review was started by a trigger (--trigger), or there was no earlier review.
+SKIP_MATERIAL_KINDS = ("order", "fill", "refused", "trigger", "proposal", "thesis")
+SKIP_PRICE_MOVE_PCT = 5.0
+MAX_LINES = 12
+
+REVIEW_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["recommendation", "lines", "proposal"],
+    "properties": {
+        "recommendation": {"type": "string", "enum": ["HOLD", "CHANGE", "EXIT"]},
+        "lines": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": MAX_LINES},
+        "proposal": {"anyOf": [
+            {"type": "null"},
+            {"type": "object", "additionalProperties": False, "required": ["action", "reason"],
+             "properties": {
+                 "action": {"type": "object", "required": ["type"], "properties": {
+                     "type": {"type": "string", "enum": list(proposals.ACTION_TYPES)},
+                     "side": {"type": "string", "enum": ["buy", "sell"]},
+                     "symbol": {"type": "string"},
+                     "notional": {"type": "number"},
+                     "qty": {"type": "number"},
+                     "patch": {"type": "object"}}},
+                 "reason": {"type": "string"}}},
+        ]},
+    },
+}
 
 INSTRUCTIONS = """\
 ---
 ## Your task
 
-You are reviewing the thesis above for me. Using only the data in this pack (run
-`.venv/bin/python tools/positions.py` or other read-only tools if you need fresher numbers):
+You are reviewing the thesis above for me, using only the data in this pack. You have no tools
+and cannot change anything; your answer is a structured reply (recommendation, lines, proposal).
 
 1. Does the original rationale (and my words in source_text) still hold? Cite the specific news or
    numbers that support or undermine it. Separate company-specific developments from market noise.
 2. How has it done versus the {bench} benchmark over the same period? If the pack says there is not
    enough snapshot history, say so; do not estimate.
-3. Recommend exactly one of: **HOLD**, **CHANGE** (say what), or **EXIT**. Say what would change your mind.
-4. If (and only if) a change or exit is warranted, call `tools/propose.py` with a concrete action
-   (spec_change patch, pause, or a sell order) and a one-line reason. Never edit the spec or the
-   database directly and never place orders with order.py during a review; proposals go to my phone.
+3. recommendation: exactly one of HOLD, CHANGE (say what), or EXIT. Say what would change your mind.
+4. proposal: null for HOLD. For CHANGE or EXIT, either null (if you only want me to think about it)
+   or one concrete action with a one-line reason; it goes to my phone for approval. Actions:
+     {{"type":"order","side":"sell","symbol":"NVDA","notional":50}}   (or "qty": 0.5 instead of notional)
+     {{"type":"pause"}}   {{"type":"resume"}}
+     {{"type":"spec_change","patch":{{"capital_cap":400}}}}   (shallow merge over the spec JSON above)
 5. Mention any wash-sale warning from the pack if it applies.
 
-Start your answer with the one-word recommendation on its own line, then at most ~12 short lines.
-I'm reading this on a phone.
+lines: at most {max_lines} short lines, plain text, no markdown headers. I'm reading this on a phone.
 """
+
+
+class ReviewError(Exception):
+    pass
 
 
 def log(*a) -> None:
@@ -106,7 +157,7 @@ def positions_section(conn, spec: ThesisSpec) -> tuple[str, list[dict]]:
     out, data = [], []
     for sym in sorted(set(dep) | set(qty)):
         q = qty.get(sym, 0.0)
-        if abs(q) < 1e-9 and abs(dep.get(sym, 0.0)) < 0.005:
+        if abs(q) < 1e-4:  # closed (below qty_decimals): its result is realized, not a position
             continue
         lp = live.get(sym)
         price = float(lp["current_price"]) if lp and lp.get("current_price") is not None else None
@@ -177,8 +228,14 @@ def performance_section(conn, spec: ThesisSpec, created: str) -> str:
     return "\n".join(lines)
 
 
+def last_real_review(conn, thesis_id: str) -> dict | None:
+    """The newest kind=review journal row that was an actual Claude review (not a skip)."""
+    return row(conn, "SELECT id, ts, data FROM journal WHERE kind='review' AND thesis_id=? "
+                     "AND COALESCE(json_extract(data, '$.skipped'), 0) = 0 ORDER BY id DESC LIMIT 1", (thesis_id,))
+
+
 def journal_section(conn, thesis_id: str) -> str:
-    last = row(conn, "SELECT id, ts FROM journal WHERE kind='review' AND thesis_id=? ORDER BY id DESC LIMIT 1", (thesis_id,))
+    last = last_real_review(conn, thesis_id)
     since_id = last["id"] if last else 0
     js = rows(conn, "SELECT ts, kind, symbol, message FROM journal WHERE thesis_id=? AND id>? AND kind!='notify' "
                     "ORDER BY id DESC LIMIT 150", (thesis_id, since_id))
@@ -224,12 +281,21 @@ def wash_sale_section(conn, spec: ThesisSpec, status: str) -> str:
 
 
 def build_pack(conn, thesis_id: str, trigger=None) -> str:
+    return _build(conn, thesis_id, trigger)[0]
+
+
+def _load(conn, thesis_id: str) -> tuple[dict, dict, ThesisSpec]:
     t = row(conn, "SELECT * FROM theses WHERE id=?", (thesis_id,))
     if t is None:
         raise LookupError(f"unknown thesis {thesis_id!r}")
     spec_json = json.loads(t["spec"])
-    spec = ThesisSpec.model_validate(spec_json)
-    pos_md, _ = positions_section(conn, spec)
+    return t, spec_json, ThesisSpec.model_validate(spec_json)
+
+
+def _build(conn, thesis_id: str, trigger=None) -> tuple[str, list[dict], ThesisSpec]:
+    """-> (markdown pack, positions rows, spec)."""
+    t, spec_json, spec = _load(conn, thesis_id)
+    pos_md, positions = positions_section(conn, spec)
     parts = [
         f"# Review: {spec.name} (`{spec.id}`)",
         f"Generated {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC. Status **{t['status']}**, mode **{t['mode']}**, "
@@ -246,55 +312,159 @@ def build_pack(conn, thesis_id: str, trigger=None) -> str:
     if trigger is not None:
         parts.append("## Trigger that started this review\n```json\n" + json.dumps(trigger, indent=2, default=str) + "\n```")
     parts.append("## Wash-sale check\n" + wash_sale_section(conn, spec, t["status"]))
-    return "\n\n".join(parts) + "\n"
+    return "\n\n".join(parts) + "\n", positions, spec
 
 
 # ---------------------------------------------------------------- running claude
 
-def run_claude(prompt: str) -> tuple[bool, str, dict | None]:
-    """-> (ok, answer, result document). Asks for JSON so token usage can be recorded; if stdout
-    is not JSON (older CLI, or a plain-text stub) the raw text is the answer and no usage is logged."""
+def _held_prices(positions: list[dict]) -> dict[str, float | None]:
+    return {p["symbol"]: p["price"] for p in positions if abs(p.get("qty") or 0) > 1e-9}
+
+
+def _coid(data) -> str | None:
     try:
-        cp = subprocess.run(claude_cmd("json"), input=prompt, cwd=str(config.ROOT), capture_output=True,
-                            text=True, timeout=TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        return False, f"claude timed out after {TIMEOUT_S // 60} minutes", None
-    except OSError as e:
-        return False, f"could not start claude: {e}", None
-    raw = (cp.stdout or "").strip()
+        return (json.loads(data or "{}") or {}).get("client_order_id")
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _dca_order_ids(conn, spec: ThesisSpec, after_id: int) -> set[str]:
+    """client_order_ids of the thesis's scheduled DCA slots journaled after `after_id` (the
+    executor's `dca` rows carry the slot; ids are deterministic per thesis/slot/symbol)."""
+    out: set[str] = set()
+    for r in rows(conn, "SELECT data FROM journal WHERE thesis_id=? AND id>? AND kind='dca'", (spec.id, after_id)):
+        try:
+            slot = (json.loads(r["data"] or "{}") or {}).get("slot")
+        except (ValueError, AttributeError, TypeError):
+            continue
+        if slot:
+            out |= {client_order_id(spec.id, sym, slot) for sym in spec.universe}
+    return out
+
+
+def material_changes(conn, spec: ThesisSpec, positions: list[dict], trigger=None) -> list[str]:
+    """Why a review is worth a Claude call (see the SKIP_* constants). Empty list = nothing changed."""
+    if trigger is not None:
+        return ["started by a trigger"]
+    last = last_real_review(conn, spec.id)
+    if last is None:
+        return ["no earlier review"]
+    reasons = []
+    q = ",".join("?" * len(SKIP_MATERIAL_KINDS))
+    routine = _dca_order_ids(conn, spec, last["id"])
+    counts: dict[str, int] = {}
+    for r in rows(conn, f"SELECT kind, data FROM journal WHERE thesis_id=? AND id>? AND kind IN ({q}) ORDER BY id",
+                  (spec.id, last["id"], *SKIP_MATERIAL_KINDS)):
+        if r["kind"] in ("order", "fill") and _coid(r["data"]) in routine:
+            continue
+        counts[r["kind"]] = counts.get(r["kind"], 0) + 1
+    for kind, n in sorted(counts.items()):
+        reasons.append(f"{n} new {kind} entr{'y' if n == 1 else 'ies'}")
+    flagged = set()
+    for n in rows(conn, "SELECT data FROM journal WHERE kind='news' AND id>?", (last["id"],)):
+        try:
+            flagged |= set((json.loads(n["data"] or "{}") or {}).get("flagged") or [])
+        except (ValueError, AttributeError, TypeError):
+            continue
+    if flagged & set(spec.universe):
+        reasons.append("news flagged " + ",".join(sorted(flagged & set(spec.universe))))
     try:
-        out = json.loads(raw)
+        before = (json.loads(last["data"] or "{}") or {}).get("prices") or {}
     except ValueError:
-        out = None
-    if isinstance(out, dict):
-        text = str(out.get("result") or "").strip()
-        if cp.returncode != 0 or out.get("is_error") or not text:
-            return False, (text or cp.stderr.strip() or f"claude exited {cp.returncode}")[-1000:], out
-        return True, text, out
-    if cp.returncode != 0 or not raw:
-        return False, (cp.stderr.strip() or raw or f"claude exited {cp.returncode}")[-1000:], None
-    return True, raw, None
+        before = {}
+    for sym, now in sorted(_held_prices(positions).items()):
+        was = before.get(sym)
+        if now is None or not was:
+            reasons.append(f"{sym}: no price to compare")
+        elif abs(now / was - 1) * 100 >= SKIP_PRICE_MOVE_PCT:
+            reasons.append(f"{sym} moved {(now / was - 1) * 100:+.1f}% since last review")
+    return reasons
 
 
-def review_one(conn, thesis_id: str, trigger=None, pack_only: bool = False) -> dict:
-    pack = build_pack(conn, thesis_id, trigger)
+def parse_answer(out: dict | None, text: str) -> dict:
+    """Validate the structured reply. Raises ReviewError. The CLI validates against REVIEW_SCHEMA
+    too; this is the check that counts."""
+    a = (out or {}).get("structured_output")
+    if a is None:
+        try:
+            a = json.loads(text)
+        except (TypeError, ValueError):
+            raise ReviewError("no structured output in claude's reply")
+    if not isinstance(a, dict):
+        raise ReviewError("structured output is not an object")
+    rec = str(a.get("recommendation", "")).strip().upper()
+    if rec not in ("HOLD", "CHANGE", "EXIT"):
+        raise ReviewError(f"bad recommendation {a.get('recommendation')!r}")
+    lines = a.get("lines")
+    if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
+        raise ReviewError("lines must be a list of strings")
+    lines = [x.strip() for x in lines if x.strip()][:MAX_LINES]
+    prop = a.get("proposal")
+    if prop is not None:
+        if not isinstance(prop, dict) or not isinstance(prop.get("action"), dict) or not str(prop.get("reason") or "").strip():
+            raise ReviewError("proposal must be null or {action: {...}, reason: '...'}")
+        prop = {"action": prop["action"], "reason": str(prop["reason"]).strip()}
+    return {"recommendation": rec, "lines": lines, "proposal": prop}
+
+
+def _propose(conn, thesis_id: str, answer: dict) -> tuple[dict | None, str | None]:
+    """Create the review's proposal, if any. -> (proposal, note for the review text)."""
+    prop = answer["proposal"]
+    if prop is None:
+        return None, None
+    if answer["recommendation"] == "HOLD":
+        return None, "(proposal ignored: recommendation is HOLD)"
+    try:
+        p = proposals.create(conn, thesis_id, prop["action"], f"review: {prop['reason']}", PROPOSAL_EXPIRES,
+                             force_confirm=True)  # a review never acts on its own, even on `mode: auto`
+    except proposals.ProposalError as e:
+        journal(conn, "error", f"review proposal for {thesis_id} refused: {e.reason}", thesis_id=thesis_id,
+                data={"proposal": prop})
+        return None, f"Proposal refused: {e.reason}"
+    return p, f"Proposal #{p['id']} ({p['status']}): {p['summary']}"
+
+
+def review_one(conn, thesis_id: str, trigger=None, pack_only: bool = False, force: bool = False) -> dict:
+    pack, positions, spec = _build(conn, thesis_id, trigger)
     if pack_only:
         return {"ok": True, "thesis": thesis_id, "pack": pack}
-    log(f"running claude for {thesis_id} ({len(pack)} chars of context)")
-    ok, answer, out = run_claude(pack + "\n" + INSTRUCTIONS.format(bench=BENCHMARK))
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    changes = material_changes(conn, spec, positions, trigger)
+    if not changes and not force:
+        last = last_real_review(conn, thesis_id)
+        journal(conn, "review", "skipped: nothing changed", thesis_id=thesis_id,
+                data={"skipped": True, "since": last["ts"] if last else None})
+        set_setting(conn, f"last_review:{thesis_id}", now)
+        log(f"{thesis_id}: nothing changed since {last['ts'] if last else '?'}; skipped")
+        return {"ok": True, "thesis": thesis_id, "skipped": True, "review": "skipped: nothing changed"}
+    log(f"running claude for {thesis_id} ({len(pack)} chars of context; {'; '.join(changes) or 'forced'})")
+    ok, text, out = run_json(pack + "\n" + INSTRUCTIONS.format(bench=BENCHMARK, max_lines=MAX_LINES),
+                             timeout=TIMEOUT_S, caller="review", json_schema=REVIEW_SCHEMA)
     usage = record_usage(conn, "review", out, ok)
+    answer = None
+    if ok:
+        try:
+            answer = parse_answer(out, text)
+        except ReviewError as e:
+            ok, text = False, f"{e}: {text[:300]}"
     if not ok:
-        journal(conn, "error", f"review of {thesis_id} failed: {answer}", thesis_id=thesis_id, data={"trigger": trigger})
-        notify.push(f"Review of {thesis_id} failed: {answer[:200]}", title="Review failed", tags=["warning"], conn=conn)
-        return {"ok": False, "thesis": thesis_id, "reason": answer}
-    journal(conn, "review", answer, thesis_id=thesis_id,
-            data={"trigger": trigger, "pack_chars": len(pack), "cost_usd": (usage or {}).get("cost_usd"),
+        journal(conn, "error", f"review of {thesis_id} failed: {text}", thesis_id=thesis_id, data={"trigger": trigger})
+        notify.push(f"Review of {thesis_id} failed: {text[:200]}", title="Review failed", tags=["warning"], conn=conn)
+        return {"ok": False, "thesis": thesis_id, "reason": text}
+    proposal, note = _propose(conn, thesis_id, answer)
+    review = "\n".join([answer["recommendation"], *answer["lines"], *([note] if note else [])])
+    journal(conn, "review", review, thesis_id=thesis_id,
+            data={"trigger": trigger, "changes": changes, "forced": bool(force and not changes),
+                  "recommendation": answer["recommendation"], "proposal": answer["proposal"],
+                  "proposal_id": (proposal or {}).get("id"), "prices": _held_prices(positions),
+                  "pack_chars": len(pack), "cost_usd": (usage or {}).get("cost_usd"),
                   "model": (usage or {}).get("model")})
-    set_setting(conn, f"last_review:{thesis_id}", datetime.now(timezone.utc).isoformat(timespec="seconds"))
-    short = answer if len(answer) <= 300 else answer[:297].rstrip() + "…"
+    set_setting(conn, f"last_review:{thesis_id}", now)
+    short = review if len(review) <= 300 else review[:297].rstrip() + "…"
     link = f"{config.WEB_URL.rstrip('/')}/thesis/{thesis_id}?token={config.WEB_TOKEN}"
     notify.push(short, title=f"Review: {thesis_id}", tags=["mag"], click=link, conn=conn)
-    return {"ok": True, "thesis": thesis_id, "review": answer, "cost_usd": (usage or {}).get("cost_usd")}
+    return {"ok": True, "thesis": thesis_id, "review": review, "recommendation": answer["recommendation"],
+            "proposal": proposal, "cost_usd": (usage or {}).get("cost_usd")}
 
 
 def due_theses(conn, today: date | None = None) -> list[str]:
@@ -320,6 +490,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--trigger", help="JSON payload describing what triggered the review")
     ap.add_argument("--pack-only", action="store_true", help="build and print the context pack; do not run claude")
     ap.add_argument("--raw", action="store_true", help="with --pack-only: print bare markdown instead of JSON")
+    ap.add_argument("--force", action="store_true", help="run Claude even if nothing material changed")
     args = ap.parse_args(argv)
     try:
         trigger = None
@@ -333,11 +504,19 @@ def main(argv: list[str] | None = None) -> int:
         try:
             if args.all:
                 ids = due_theses(conn)
-                results = [review_one(conn, i, trigger, args.pack_only) for i in ids]
+                if ids and not args.pack_only:
+                    # scheduled path (thesis-review.timer): bounded wait for the broker so a
+                    # review right after boot has live positions. Not up -> one journaled error,
+                    # nothing reviewed, last_review untouched so the next run picks them up.
+                    ready, why = tclient.wait_for_broker("review", conn=conn)
+                    if not ready:
+                        print(json.dumps({"ok": False, "due": ids, "reason": why}, indent=2))
+                        return 1
+                results = [review_one(conn, i, trigger, args.pack_only, args.force) for i in ids]
                 doc = {"ok": all(r["ok"] for r in results), "due": ids, "results": results}
             else:
                 try:
-                    doc = review_one(conn, args.thesis, trigger, args.pack_only)
+                    doc = review_one(conn, args.thesis, trigger, args.pack_only, args.force)
                 except LookupError as e:
                     doc = {"ok": False, "reason": str(e.args[0])}
         finally:

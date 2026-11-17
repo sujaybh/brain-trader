@@ -27,6 +27,9 @@ class StubBroker:
         if StubBroker.down:
             raise tclient.BrokerError(0, "broker daemon unreachable at http://127.0.0.1:8787: refused")
 
+    def health(self):
+        return {"ok": True, "mode": "paper"}
+
     def account(self):
         return {"equity": "1234.5", "cash": "900", "buying_power": "900"}
 
@@ -324,25 +327,140 @@ def test_review_wash_sale_warning(conn):
     assert "WARNING" in pack and "NVDA" in pack.split("## Wash-sale check")[1]
 
 
+def review_doc(rec="HOLD", lines=("Rationale intact.",), proposal=None, **kw):
+    """A `claude -p --output-format json --json-schema` result document."""
+    so = {"recommendation": rec, "lines": list(lines), "proposal": proposal}
+    return dict(RESULT_DOC, result=json.dumps(so), structured_output=so, session_id="sess-r", **kw)
+
+
+def fake_claude(monkeypatch, *docs):
+    """Replace subprocess.run (used by web/chat.run_json) with a stub returning docs in turn.
+    Returns the list of calls (cmd, kwargs)."""
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw))
+        d = docs[min(len(calls), len(docs)) - 1]
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(d), stderr="")
+
+    monkeypatch.setattr(chat.subprocess, "run", run)
+    return calls
+
+
 def test_review_runs_claude_and_journals(conn, monkeypatch, capsys):
     from tools import review
     insert_thesis(config.DB_PATH)
-    seen = {}
-
-    def fake_run(cmd, **kw):
-        seen.update(cmd=cmd, **kw)
-        return subprocess.CompletedProcess(cmd, 0, stdout="HOLD\nRationale intact.", stderr="")
-
-    monkeypatch.setattr(review.subprocess, "run", fake_run)
+    add_filled(conn)
+    calls = fake_claude(monkeypatch, review_doc())
     assert review.main(["--thesis", "semis"]) == 0
-    assert json.loads(capsys.readouterr().out)["review"].startswith("HOLD")
-    assert seen["cwd"] == str(config.ROOT) and seen["timeout"] == 600 and "--output-format" in seen["cmd"]
-    assert "tools/propose.py" in seen["input"] and "# Review: Semis" in seen["input"]
-    assert db.row(conn, "SELECT message FROM journal WHERE kind='review'")["message"].startswith("HOLD")
+    out = json.loads(capsys.readouterr().out)
+    assert out["review"] == "HOLD\nRationale intact." and out["recommendation"] == "HOLD" and out["proposal"] is None
+    cmd, kw = calls[0]
+    assert kw["cwd"] == str(config.ROOT) and kw["timeout"] == 600 and "--output-format" in cmd
+    # single turn, no tools, structured output, not resumable
+    assert cmd[cmd.index("--tools") + 1] == "" and "--allowedTools" not in cmd and "--no-session-persistence" in cmd
+    assert json.loads(cmd[cmd.index("--json-schema") + 1]) == review.REVIEW_SCHEMA
+    assert "--append-system-prompt" not in cmd  # the pack is self-contained
+    assert kw["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
+    assert "tools/propose.py" not in kw["input"] and "# Review: Semis" in kw["input"]
+    assert '"type":"pause"' in kw["input"]  # action formats are spelled out
+    j = db.row(conn, "SELECT message, data FROM journal WHERE kind='review'")
+    assert j["message"].startswith("HOLD")
+    assert json.loads(j["data"])["prices"] == {"NVDA": 120.0}  # baseline for the next skip check
     assert db.get_setting(conn, "last_review:semis")
     push = json.loads(db.row(conn, "SELECT data FROM journal WHERE kind='notify'")["data"])
     assert push["title"] == "Review: semis"
     assert review.due_theses(conn) == []  # just reviewed
+
+
+def test_review_exit_creates_proposal(conn, monkeypatch, capsys):
+    from tools import review
+    insert_thesis(config.DB_PATH)
+    add_filled(conn)
+    sell = {"action": {"type": "order", "side": "sell", "symbol": "nvda", "qty": 0.5}, "reason": "guidance cut"}
+    fake_claude(monkeypatch, review_doc("EXIT", ["Thesis broken."], sell))
+    assert review.main(["--thesis", "semis"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    p = out["proposal"]
+    assert p["status"] == "pending" and p["action"]["symbol"] == "NVDA" and p["reason"] == "review: guidance cut"
+    assert out["review"].endswith(f"Proposal #{p['id']} (pending): sell 0.5 sh NVDA")
+    assert StubBroker.placed == []  # confirm mode: nothing executes without a tap
+    assert json.loads(db.row(conn, "SELECT data FROM journal WHERE kind='review'")["data"])["proposal_id"] == p["id"]
+    titles = [json.loads(r["data"])["title"] for r in db.rows(conn, "SELECT data FROM journal WHERE kind='notify' ORDER BY id")]
+    assert titles == [f"Proposal #{p['id']}", "Review: semis"]
+
+
+def test_review_proposal_refused_or_ignored(conn, monkeypatch, capsys):
+    from tools import review
+    insert_thesis(config.DB_PATH)
+    bad = {"action": {"type": "spec_change", "patch": {"capital_cap": -5}}, "reason": "x"}
+    fake_claude(monkeypatch, review_doc("CHANGE", ["Shrink it."], bad))
+    assert review.main(["--thesis", "semis", "--force"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["proposal"] is None and "Proposal refused: patched spec is invalid" in out["review"]
+    assert db.rows(conn, "SELECT * FROM proposals") == []
+    fake_claude(monkeypatch, review_doc("HOLD", ["Fine."], {"action": {"type": "pause"}, "reason": "y"}))
+    assert review.main(["--thesis", "semis", "--force"]) == 0
+    assert "proposal ignored" in json.loads(capsys.readouterr().out)["review"]
+    assert db.rows(conn, "SELECT * FROM proposals") == []
+
+
+def test_review_bad_structured_output_fails(conn, monkeypatch, capsys):
+    from tools import review
+    insert_thesis(config.DB_PATH)
+    doc = dict(RESULT_DOC, result="HOLD, looks fine")  # no structured_output, result not JSON
+    fake_claude(monkeypatch, doc)
+    assert review.main(["--thesis", "semis"]) == 1
+    assert "no structured output" in json.loads(capsys.readouterr().out)["reason"]
+    fake_claude(monkeypatch, review_doc("MAYBE"))
+    assert review.main(["--thesis", "semis"]) == 1
+    assert "bad recommendation" in json.loads(capsys.readouterr().out)["reason"]
+    assert db.rows(conn, "SELECT * FROM journal WHERE kind='review'") == []
+    assert db.row(conn, "SELECT COUNT(*) n FROM claude_usage")["n"] == 2  # still counted
+
+
+def test_review_skips_when_nothing_changed(conn, monkeypatch, capsys):
+    from tools import review
+    insert_thesis(config.DB_PATH)
+    add_filled(conn)
+    calls = fake_claude(monkeypatch, review_doc())
+    assert review.main(["--thesis", "semis"]) == 0  # no earlier review: runs
+    capsys.readouterr()
+    assert review.main(["--thesis", "semis"]) == 0  # nothing since: skipped, no claude
+    assert json.loads(capsys.readouterr().out)["skipped"] is True and len(calls) == 1
+    js = db.rows(conn, "SELECT message, data FROM journal WHERE kind='review' ORDER BY id")
+    assert js[-1]["message"] == "skipped: nothing changed" and json.loads(js[-1]["data"])["skipped"] is True
+    assert review.main(["--thesis", "semis", "--force"]) == 0 and len(calls) == 2
+    assert review.main(["--thesis", "semis", "--trigger", '{"type":"drawdown_pct"}']) == 0 and len(calls) == 3
+    capsys.readouterr()
+
+    # each kind of material change triggers a real review (the skip baseline is the last real one)
+    db.journal(conn, "fill", "bought NVDA", thesis_id="semis")
+    assert review.main(["--thesis", "semis"]) == 0 and len(calls) == 4
+    db.journal(conn, "news", "FLAGGED AMD. ...", data={"flagged": ["AMD"]})
+    assert review.material_changes(conn, review._load(conn, "semis")[2], [], None) == ["news flagged AMD"]
+    db.journal(conn, "news", "FLAGGED XOM.", data={"flagged": ["XOM"]})  # not in the universe
+    spec = review._load(conn, "semis")[2]
+    assert review.main(["--thesis", "semis"]) == 0 and len(calls) == 5
+    assert review.material_changes(conn, spec, [{"symbol": "NVDA", "qty": 0.5, "price": 125.0}]) == []  # +4.2%
+    assert review.material_changes(conn, spec, [{"symbol": "NVDA", "qty": 0.5, "price": 126.0}]) == \
+        ["NVDA moved +5.0% since last review"]
+    assert review.material_changes(conn, spec, [{"symbol": "NVDA", "qty": 0.5, "price": None}]) == \
+        ["NVDA: no price to compare"]
+    assert review.material_changes(conn, spec, [{"symbol": "AMD", "qty": 0.0, "price": None}]) == []  # not held
+
+
+def test_review_skip_restarts_cadence(conn, monkeypatch, capsys):
+    from tools import review
+    insert_thesis(config.DB_PATH)
+    calls = fake_claude(monkeypatch, review_doc())
+    review.main(["--thesis", "semis"])
+    conn.execute("UPDATE settings SET value='2026-01-01T00:00:00+00:00' WHERE key='last_review:semis'")
+    assert review.due_theses(conn) == ["semis"]
+    capsys.readouterr()
+    assert review.main(["--all"]) == 0 and len(calls) == 1  # due, but nothing changed: skipped
+    assert json.loads(capsys.readouterr().out)["results"][0]["skipped"] is True
+    assert review.due_theses(conn) == []
 
 
 def test_review_all_due(conn):
@@ -425,6 +543,89 @@ def test_claude_cmd_pins_model(monkeypatch):
     assert "--model" not in chat.claude_cmd("json")
 
 
+def test_claude_model_per_caller(monkeypatch):
+    monkeypatch.setattr(config, "CLAUDE_MODEL", "sonnet")
+    monkeypatch.setattr(config, "CLAUDE_MODEL_REVIEW", "haiku")
+    monkeypatch.setattr(config, "CLAUDE_MODEL_CHAT", None)
+    model = lambda c: c[c.index("--model") + 1]  # noqa: E731
+    assert model(chat.claude_cmd("json", caller="review")) == "haiku"
+    assert model(chat.claude_cmd("json")) == "sonnet"  # unset -> CLAUDE_MODEL
+    monkeypatch.setattr(config, "CLAUDE_MODEL_CHAT", "")  # explicit "" -> CLI default
+    assert "--model" not in chat.claude_cmd("json")
+
+
+def test_claude_cmd_lockdown(monkeypatch):
+    for k in ("CLAUDE_ALLOWED_TOOLS", "CLAUDE_TOOLS_CHAT", "CLAUDE_LOCKDOWN", "CLAUDE_DISALLOWED_TOOLS_CHAT"):
+        monkeypatch.delenv(k, raising=False)
+    cmd = chat.claude_cmd("json")
+    for flag in ("--strict-mcp-config", "--disable-slash-commands", "--exclude-dynamic-system-prompt-sections"):
+        assert flag in cmd
+    assert "--mcp-config" not in cmd and "--bare" not in cmd  # --bare would break subscription auth
+    assert cmd[cmd.index("--setting-sources") + 1] == "project,local"
+    assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
+    assert cmd[cmd.index("--tools") + 1] == "Bash,Read,Grep,Glob"
+    allowed = cmd[cmd.index("--allowedTools") + 1].split(",")
+    assert [t for t in allowed if t.startswith("Bash")] == ["Bash(.venv/bin/python tools/*)"]
+    assert cmd[cmd.index("--disallowedTools") + 1] == "Read(./config/*.env)"
+    # user CLAUDE.md discovery is off, so the project CLAUDE.md is passed explicitly
+    sp = cmd[cmd.index("--append-system-prompt") + 1]
+    assert "You are the broker for my personal thesis-trading system" in sp
+    env = chat.claude_env()
+    assert env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false" and env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
+    assert env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"
+    assert "--no-session-persistence" not in cmd  # chat sessions are resumed
+    monkeypatch.setenv("CLAUDE_TOOLS_CHAT", "Bash")
+    monkeypatch.setenv("CLAUDE_ALLOWED_TOOLS", "Bash(.venv/bin/python tools/positions.py)")
+    cmd = chat.claude_cmd("json")
+    assert cmd[cmd.index("--tools") + 1] == "Bash"
+    assert cmd[cmd.index("--allowedTools") + 1] == "Bash(.venv/bin/python tools/positions.py)"
+    monkeypatch.setenv("CLAUDE_LOCKDOWN", "0")
+    cmd = chat.claude_cmd("json")
+    assert "--strict-mcp-config" not in cmd and "--tools" not in cmd and "--append-system-prompt" not in cmd
+    monkeypatch.delenv("CLAUDE_CODE_DISABLE_CLAUDE_MDS", raising=False)
+    assert "CLAUDE_CODE_DISABLE_CLAUDE_MDS" not in chat.claude_env()
+
+
+def test_chat_rotates_session(conn, monkeypatch):
+    sids = iter(f"s{i}" for i in range(1, 50))
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw))
+        doc = dict(RESULT_DOC, result=f"answer {len(calls)}", session_id=next(sids) if "--resume" not in cmd
+                   else cmd[cmd.index("--resume") + 1])
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(doc), stderr="")
+
+    monkeypatch.setattr(chat.subprocess, "run", run)
+    monkeypatch.setattr(chat, "CHAT_MAX_TURNS", 3)
+    for i in range(3):
+        r = chat.send(conn, f"q{i}")
+        assert r["ok"] and r["rotated"] is None
+    assert ["--resume" in c for c, _ in calls] == [False, True, True]
+    assert calls[0][1]["input"] == "q0"  # nothing to recap on the very first message
+    assert db.get_setting(conn, "chat_session_turns") == "3"
+    r = chat.send(conn, "q3")
+    assert r["rotated"] == "3 messages in session" and not r["resumed"] and "--resume" not in calls[-1][0]
+    recap = calls[-1][1]["input"]
+    assert recap.startswith("[Fresh session") and "me: q2" in recap and "you: answer 3" in recap
+    assert recap.endswith("[End of recap]\n\nq3") and recap.count("q3") == 1
+    assert db.get_setting(conn, "chat_session") == "s2" and db.get_setting(conn, "chat_session_turns") == "1"
+
+    # context threshold: RESULT_DOC averages 9510 tokens over 3 requests -> 3170
+    assert db.get_setting(conn, "chat_session_context") == "3170"
+    monkeypatch.setattr(chat, "CHAT_MAX_CONTEXT_TOKENS", 3000)
+    assert chat.send(conn, "q4")["rotated"] == "context reached 3170 tokens"
+
+
+def test_context_tokens_uses_last_request():
+    doc = {"num_turns": 2, "usage": {"input_tokens": 4, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 50,
+                                     "iterations": [{"input_tokens": 2, "cache_read_input_tokens": 40},
+                                                    {"input_tokens": 2, "cache_read_input_tokens": 60,
+                                                     "cache_creation_input_tokens": 50}]}}
+    assert chat.context_tokens(doc) == 112
+    assert chat.context_tokens(None) == 0
+
+
 def test_chat_records_usage(web, conn, monkeypatch):
     monkeypatch.setattr(chat.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
         cmd, 0, stdout=json.dumps(RESULT_DOC), stderr=""))
@@ -460,9 +661,7 @@ def test_usage_cost_is_delta_over_resumed_session(conn):
 def test_review_records_usage_from_json(conn, monkeypatch, capsys):
     from tools import review
     insert_thesis(config.DB_PATH)
-    doc = dict(RESULT_DOC, result="HOLD\nFine.", session_id="sess-r")
-    monkeypatch.setattr(review.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
-        cmd, 0, stdout=json.dumps(doc), stderr=""))
+    fake_claude(monkeypatch, review_doc("HOLD", ["Fine."]))
     assert review.main(["--thesis", "semis"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["review"].startswith("HOLD") and out["cost_usd"] == 0.0123
@@ -476,7 +675,7 @@ def test_review_json_error_is_failure(conn, monkeypatch, capsys):
     from tools import review
     insert_thesis(config.DB_PATH)
     doc = dict(RESULT_DOC, is_error=True, result="rate limited")
-    monkeypatch.setattr(review.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
+    monkeypatch.setattr(chat.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
         cmd, 1, stdout=json.dumps(doc), stderr=""))
     assert review.main(["--thesis", "semis"]) == 1
     assert "rate limited" in json.loads(capsys.readouterr().out)["reason"]
@@ -504,3 +703,37 @@ def test_usage_tool_and_dashboard(web, conn, monkeypatch, capsys):
     monkeypatch.setattr(config, "CLAUDE_BUDGET_USD_WEEK", 0.0)
     st = web.get("/api/state").json()["claude"]
     assert st["budget_usd_week"] is None and st["week_pct_of_budget"] is None
+
+
+def test_review_ignores_routine_dca_fills(conn, monkeypatch, capsys):
+    from tools import review
+    from trader.schedule import client_order_id
+    insert_thesis(config.DB_PATH)
+    add_filled(conn)
+    calls = fake_claude(monkeypatch, review_doc())
+    assert review.main(["--thesis", "semis"]) == 0 and len(calls) == 1
+    spec = review._load(conn, "semis")[2]
+    slot = "2026-10-26T10:00"
+    for sym in spec.universe:
+        coid = client_order_id("semis", sym, slot)
+        db.journal(conn, "order", f"placed {sym}", thesis_id="semis", data={"client_order_id": coid})
+        db.journal(conn, "fill", f"filled {sym}", thesis_id="semis", data={"client_order_id": coid})
+    db.journal(conn, "dca", f"slot {slot}: bought", thesis_id="semis", data={"slot": slot})
+    assert review.material_changes(conn, spec, []) == []  # routine slot: not material
+    db.journal(conn, "refused", "NVDA refused", thesis_id="semis")
+    db.journal(conn, "fill", "manual NVDA", thesis_id="semis",
+               data={"client_order_id": client_order_id("semis", "NVDA", "2026-10-27T11:02:03")})
+    assert review.material_changes(conn, spec, []) == ["1 new fill entry", "1 new refused entry"]
+    capsys.readouterr()
+
+
+def test_review_proposal_on_auto_thesis_waits_for_tap(conn, monkeypatch, capsys):
+    from tools import review
+    insert_thesis(config.DB_PATH, mode="auto")
+    approved = []
+    monkeypatch.setattr(review.proposals, "approve", lambda *a, **k: approved.append(a) or {})
+    fake_claude(monkeypatch, review_doc("CHANGE", proposal={"action": {"type": "pause"}, "reason": "thesis broke"}))
+    assert review.main(["--thesis", "semis", "--force"]) == 0
+    p = db.rows(conn, "SELECT status FROM proposals ORDER BY id DESC LIMIT 1")
+    assert approved == [] and p and p[0]["status"] == "pending"
+    capsys.readouterr()

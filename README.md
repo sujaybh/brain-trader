@@ -12,8 +12,12 @@ and Qwen does the cheap text work. Full design: `docs/brief.md`.
 ```
 broker/      localhost daemon; holds the Alpaca keys; enforces every limit; journals everything
 tools/       CLI scripts Claude Code runs: quote, positions, thesis_*, run_thesis, order, propose,
-             news, review, journal, notify, halt, snapshot, check_triggers
-scheduler/   tick.py (every 15 min, market hours) and nightly.py, plus systemd units + install.sh
+             news, review, journal, notify, halt, snapshot, check_triggers,
+             bars (daily bars), run_strategy (strategy signals -> proposals), backtest
+strategies/  strategy families: pure signals() per spec strategy.type (dca, momentum), shared caps,
+             and the backtester (backtest.py)
+scheduler/   tick.py (every 15 min, market hours), nightly.py (incl. the bars update), weekly
+             review timer, systemd units, install scripts, doctor.py health check
 web/         phone dashboard + chat over Tailscale, approve/reject endpoints for ntfy buttons
 trader/      shared library: config, db schema, thesis spec, scheduling math, broker client, notify
 data/        trader.db (SQLite) and the HALT kill-switch file
@@ -28,7 +32,8 @@ tests/       pytest; the broker has a fake backend so the whole chain runs witho
 git clone <repo> tracker && cd tracker
 ./setup.sh                       # venv, requirements, config/trader.env with fresh tokens, runs the tests
 $EDITOR config/alpaca.env        # paste paper keys from the Alpaca dashboard (Paper Trading -> API keys)
-scheduler/install-user.sh        # user systemd units: broker, web, tick timer, nightly timer (no sudo)
+scheduler/install-user.sh        # user systemd units: broker, web, tick/nightly/weekly-review timers (no sudo)
+.venv/bin/python scheduler/doctor.py   # read-only health check of units, broker, Ollama, claude, DB
 .venv/bin/python tools/positions.py
 ```
 
@@ -57,11 +62,31 @@ BROKER_BACKEND=fake .venv/bin/python -m broker &      # fake Alpaca, market alwa
 - Describe a thesis in chat. Claude compiles it, reads back one paragraph, you say yes.
 - Every 15 minutes during market hours the tick timer executes any due DCA slot. If the
   laptop was asleep, the slot catches up within 48 hours and then expires.
+- Fills reach the phone within about a minute: the broker daemon checks its open orders every
+  `BROKER_FILL_POLL_SECONDS` (60) while the market is open; the tick reconciles too, and a fill
+  is pushed once either way.
+- P&L: cost basis is average cost per thesis per symbol (`trader/pnl.py`). Closed positions
+  leave the position list; their result is `realized_pl` (positions.py, snapshots, dashboard).
+  The dashboard and thesis page show each thesis's return since its first fill vs the same
+  dollars put into SPY on the same days, from the nightly snapshots ("not enough history"
+  until there is a snapshot after the first fill day).
 - Nightly: reconcile, snapshot, news digest, trigger check. Triggers produce proposals or a
-  Claude review session, never a silent trade.
+  Claude review, never a silent trade.
+- Reviews (`tools/review.py`, on each thesis's cadence or a trigger) are one tool-free Claude
+  call with structured output: HOLD / CHANGE / EXIT, a few lines, and at most one proposal,
+  which the script files like `propose.py` does. If nothing material changed since the last
+  review (no orders, fills, refusals, triggers, proposals or flagged news, held prices within
+  5%), it journals "skipped: nothing changed" and does not call Claude; `--force` overrides.
+- Chat and reviews run `claude -p` isolated from your personal Claude Code setup (no MCP
+  servers or claude.ai connectors, no global CLAUDE.md, memory, plugins or skills); see
+  `web/README.md`.
+- Saturdays 10:00 ET: `review.py --all` reviews every thesis whose review cadence is due.
+- Moving to an always-on server: see `scheduler/README.md`.
 - Proposals arrive as a notification with Approve / Reject buttons. `mode: auto` theses
   skip the buttons and just tell you.
 - `touch data/HALT` stops everything. Only you remove it.
+- Strategy theses (`strategy` block, e.g. momentum): backtest first with `tools/backtest.py`, then
+  `tools/run_strategy.py` turns signals into proposals. Not on a timer yet; see docs/thesis-spec.md.
 
 ## Limits (`config/limits.json`)
 

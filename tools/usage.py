@@ -52,6 +52,7 @@ def summary(conn, now: datetime | None = None) -> dict:
     pct = round(100 * week["cost_usd"] / budget, 1) if budget else None
     return {
         "model": config.CLAUDE_MODEL or "(cli default)",
+        "models": {c: config.claude_model(c) or "(cli default)" for c in ("chat", "review")},
         "windows": windows,
         "by_caller_7d": totals(conn, _since(now, "7d"), "caller"),
         "by_model_7d": totals(conn, _since(now, "7d"), "model"),
