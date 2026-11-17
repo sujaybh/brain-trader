@@ -106,3 +106,38 @@ def load_limits() -> dict:
     if LIMITS_PATH.exists():
         limits.update(json.loads(LIMITS_PATH.read_text()))
     return limits
+
+
+# --- Docker / reverse-proxy deployment (deploy/) ---
+# WEB_BASIC_AUTH=user:password adds HTTP Basic auth in front of every web route (except
+# /healthz), on top of WEB_TOKEN. Empty = off. The ntfy Approve/Reject actions then carry the
+# matching Authorization header.
+WEB_BASIC_AUTH = env("WEB_BASIC_AUTH", "") or ""
+
+# ---- LLM backend for dashboard chat and reviews: "claude" (Claude Code CLI, default) or "ollama"
+# (in-process, no Claude login needed). LLM_BACKEND_CHAT / LLM_BACKEND_REVIEW override per caller.
+LLM_BACKEND = env("LLM_BACKEND", "claude")
+LLM_BACKEND_CHAT = env("LLM_BACKEND_CHAT")
+LLM_BACKEND_REVIEW = env("LLM_BACKEND_REVIEW")
+LLM_BACKENDS = ("claude", "ollama")
+# Models used when a caller runs on Ollama; unset = OLLAMA_MODEL (the fallback host uses
+# OLLAMA_FALLBACK_MODEL regardless).
+OLLAMA_CHAT_MODEL = env("OLLAMA_CHAT_MODEL") or OLLAMA_MODEL
+OLLAMA_REVIEW_MODEL = env("OLLAMA_REVIEW_MODEL") or OLLAMA_MODEL
+# Context window requested from Ollama (its own default, 4096, silently truncates review packs).
+OLLAMA_NUM_CTX = int(env("OLLAMA_NUM_CTX", "16384") or 16384)
+
+
+def llm_backend(caller: str) -> str:
+    """'claude' or 'ollama' for a caller ('chat', 'review'): LLM_BACKEND_<CALLER>, else LLM_BACKEND.
+    An unknown value raises ValueError (checked at use, so a typo is a clear error, not a silent default)."""
+    v = globals().get(f"LLM_BACKEND_{caller.upper()}")
+    v = (LLM_BACKEND if v is None or not str(v).strip() else str(v)).strip().lower()
+    if v not in LLM_BACKENDS:
+        raise ValueError(f"unknown LLM backend {v!r} for {caller} (LLM_BACKEND / LLM_BACKEND_{caller.upper()}); "
+                         f"use one of: {', '.join(LLM_BACKENDS)}")
+    return v
+
+
+def ollama_model(caller: str) -> str:
+    return (OLLAMA_CHAT_MODEL if caller == "chat" else OLLAMA_REVIEW_MODEL) or OLLAMA_MODEL

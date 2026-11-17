@@ -68,6 +68,15 @@ def _web_link(path: str) -> str:
     return f"{config.WEB_URL.rstrip('/')}{path}?token={config.WEB_TOKEN}"
 
 
+def _action_headers() -> dict:
+    """ntfy http actions run on the phone, so with WEB_BASIC_AUTH set they must carry the
+    Authorization header themselves (the token alone no longer gets through)."""
+    if not config.WEB_BASIC_AUTH:
+        return {}
+    import base64
+    return {"Authorization": "Basic " + base64.b64encode(config.WEB_BASIC_AUTH.encode()).decode()}
+
+
 def _push(conn, text: str, **kw) -> None:
     try:
         notify.push(text, conn=conn, **kw)
@@ -221,11 +230,12 @@ def create(conn, thesis_id: str, action: Any, reason: str, expires: timedelta = 
                                               "mode": mode, "expires": exp})
     if mode == "auto" or approve_now:
         return approve(conn, pid, by=approve_now or "auto")
+    _hdr = {"headers": _action_headers()} if config.WEB_BASIC_AUTH else {}
     actions = [
         {"action": "http", "label": "Approve", "url": _web_link(f"/api/proposals/{pid}/approve"),
-         "method": "POST", "clear": True},
+         "method": "POST", "clear": True, **_hdr},
         {"action": "http", "label": "Reject", "url": _web_link(f"/api/proposals/{pid}/reject"),
-         "method": "POST", "clear": True},
+         "method": "POST", "clear": True, **_hdr},
     ]
     _push(conn, f"[{thesis_id}] {summary}\n{reason}", title=f"Proposal #{pid}", tags=["question"],
           actions=actions, click=_web_link("/"))

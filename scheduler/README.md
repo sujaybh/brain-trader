@@ -191,3 +191,12 @@ Both installers render every template in `systemd/` with `render-units.sh` (`__R
 checkout, `__HOME__` = the owner's home). The user flavor drops `User=`/hardening lines and
 `network-online.target` / `ollama.service`, which the user manager does not have. Re-run the
 installer after pulling changes to `systemd/`.
+
+## Without systemd: Docker
+
+`scheduler/cron_loop.py` is a long-running replacement for the three timers (tick, nightly, weekly
+review, America/New_York), used by the Docker deployment in `deploy/` (see `deploy/README.md`). It runs
+the same commands as the units, one at a time, logs to stdout, records `cron_last:<job>` in `settings`
+and catches up once after downtime. `--dry-run` shows the schedule, `--once [--job tick]` runs what is
+due and exits. `doctor.py` auto-detects the compose project (docker mode) and FAILs if systemd units
+are also active.

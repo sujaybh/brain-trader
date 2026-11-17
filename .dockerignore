@@ -1,0 +1,11 @@
+.git
+.gitignore
+.claude
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+data
+config/*.env
+deploy/.env
+*.log

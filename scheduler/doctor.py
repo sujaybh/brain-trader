@@ -8,6 +8,12 @@ with one {"check", "status", "detail"} per check. Exit 0 when nothing FAILed, 1 
 
   .venv/bin/python scheduler/doctor.py            # auto-detects user vs system units
   .venv/bin/python scheduler/doctor.py --mode system
+  .venv/bin/python scheduler/doctor.py --mode docker   # Docker Compose deployment (auto-detected
+                                                       # when the compose project has running containers)
+
+Docker mode checks: containers up and healthy, the scheduler loop's heartbeat is fresh, and the
+systemd units are NOT also active (FAIL if both run: double DCA orders). The same exclusivity
+FAIL is raised in the other modes when compose containers are running.
 """
 import sys
 from pathlib import Path
@@ -38,6 +44,11 @@ ALWAYS_ON = ("thesis-broker.service", "thesis-web.service")
 # unit files the systemd user manager would not have / that only make sense system-wide
 SYSTEM_ONLY_TARGETS = ("network-online.target",)
 STALE_DAYS = {"tick": 4, "nightly": 4}  # a long weekend is fine; longer means something is off
+COMPOSE_PROJECT = os.environ.get("COMPOSE_PROJECT_NAME") or "thesis"
+DOCKER_SERVICES = ("broker", "web", "scheduler")
+EXCLUSIVE_UNITS = ("thesis-broker.service", "thesis-web.service", "thesis-tick.timer",
+                   "thesis-nightly.timer", "thesis-review.timer")
+LOOP_STALE = timedelta(minutes=5)
 SYSTEMD_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 
@@ -49,6 +60,9 @@ class Doctor:
         self.now = now or datetime.now(timezone.utc)
         detected = self.detect_mode()
         self.mode = mode or detected
+        self._docker: dict[str, str] | None = None
+        if mode is None and self.docker_services():
+            self.mode = "docker"
 
     # ------------------------------------------------------------ plumbing
     @staticmethod
@@ -77,6 +91,75 @@ class Doctor:
         self._both = u and s
         self._none = not (u or s)
         return "system" if s and not u else "user"
+
+    # ------------------------------------------------------------ docker
+    def docker_services(self) -> dict[str, str]:
+        """{service: status text} of the RUNNING containers of the compose project (cached)."""
+        if self._docker is None:
+            self._docker = {}
+            rc, out = self.run(["docker", "ps", "-a", "--filter", f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+                                "--format", '{{.Label "com.docker.compose.service"}}\t{{.Status}}'])
+            if rc == 0:
+                for line in out.splitlines():
+                    svc, _, status = line.partition("\t")
+                    if svc and status.startswith("Up"):
+                        self._docker[svc] = status
+        return self._docker
+
+    def systemd_active_units(self) -> list[str]:
+        """Thesis units that are active, user and system flavor (read-only is-active calls)."""
+        active = []
+        for flavor, d in (("user", USER_DIR), ("system", SYSTEM_DIR)):
+            if not (d / "thesis-broker.service").exists():
+                continue
+            for u in EXCLUSIVE_UNITS:
+                rc, out = self.run(["systemctl", *(["--user"] if flavor == "user" else []), "is-active", u])
+                if rc == 0 and out.strip() == "active":
+                    active.append(f"{flavor}:{u}")
+        return active
+
+    def check_exclusive(self) -> None:
+        """Docker and systemd must not both run: two brokers/schedulers on one DB."""
+        up, units = self.docker_services(), self.systemd_active_units()
+        if up and units:
+            self.add("exclusive", "FAIL", f"BOTH docker (project '{COMPOSE_PROJECT}': {', '.join(sorted(up))}) and "
+                     f"systemd ({', '.join(units)}) are active: double DCA attempts. Run deploy/switch.sh "
+                     "docker|systemd to leave only one.")
+        elif self.mode == "docker":
+            self.add("exclusive", "PASS", "no thesis systemd units are active (docker only)")
+
+    def check_docker_containers(self) -> None:
+        up = self.docker_services()
+        for svc in DOCKER_SERVICES:
+            st = up.get(svc)
+            if st is None:
+                self.add(f"container_{svc}", "FAIL", f"{svc} is not running (docker compose -p {COMPOSE_PROJECT} ps)")
+            elif "unhealthy" in st:
+                self.add(f"container_{svc}", "FAIL", st)
+            elif "health: starting" in st:
+                self.add(f"container_{svc}", "WARN", st)
+            elif "(healthy)" in st:
+                self.add(f"container_{svc}", "PASS", st)
+            else:
+                self.add(f"container_{svc}", "WARN", f"{st} (no healthcheck reported)")
+
+    def check_scheduler_loop(self) -> None:
+        try:
+            conn = self._ro()
+            row = conn.execute("SELECT value FROM settings WHERE key='cron_alive'").fetchone() if conn else None
+            if conn:
+                conn.close()
+        except sqlite3.Error as e:
+            self.add("scheduler_loop", "FAIL", f"cannot read the DB: {e}")
+            return
+        age = self._age(row[0] if row else None)
+        if age is None:
+            self.add("scheduler_loop", "FAIL", "no cron_alive heartbeat in settings: scheduler/cron_loop.py never ran")
+        elif age > LOOP_STALE:
+            self.add("scheduler_loop", "FAIL", f"heartbeat is {age.total_seconds() / 60:.0f} min old (limit "
+                     f"{LOOP_STALE.total_seconds() / 60:.0f}): the loop is stuck or stopped")
+        else:
+            self.add("scheduler_loop", "PASS", f"heartbeat {age.total_seconds():.0f}s ago")
 
     # ------------------------------------------------------------ unit files
     def render(self, flavor: str, dest: Path) -> tuple[bool, str]:
@@ -362,6 +445,10 @@ class Doctor:
 
     # ------------------------------------------------------------
     def run_all(self) -> dict:
+        if self.mode == "docker":
+            return self._run_docker()
+        if self.docker_services():
+            self.check_exclusive()
         self.check_install_mode()
         self.check_verify("user")
         self.check_verify("system")
@@ -375,6 +462,19 @@ class Doctor:
         self.check_data_dir()
         self.check_db()
         self.check_second_machine()
+        return self._result()
+
+    def _run_docker(self) -> dict:
+        self.check_exclusive()
+        self.check_docker_containers()
+        self.check_scheduler_loop()
+        self.check_ollama()
+        self.check_data_dir()
+        self.check_db()
+        self.check_second_machine()
+        return self._result()
+
+    def _result(self) -> dict:
         summary = {k: sum(1 for c in self.checks if c["status"] == k) for k in ("PASS", "WARN", "FAIL", "INFO")}
         return {"ok": summary["FAIL"] == 0, "mode": self.mode, "root": str(ROOT), "db": str(self.db_path),
                 "summary": summary, "checks": self.checks}
@@ -382,7 +482,8 @@ class Doctor:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", choices=("user", "system"), help="default: auto-detect from installed units")
+    ap.add_argument("--mode", choices=("user", "system", "docker"),
+                    help="default: docker if the compose project is running, else detect from installed units")
     ap.add_argument("--db", help="DB path (default from config: TRADER_DATA_DIR/trader.db); opened read-only")
     a = ap.parse_args(argv)
     out = Doctor(mode=a.mode, db_path=Path(a.db) if a.db else None).run_all()

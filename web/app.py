@@ -1,6 +1,9 @@
 """Phone-facing dashboard + chat over Tailscale. FastAPI + Jinja2, no JS framework.
 
-Auth: every route needs `token` == config.WEB_TOKEN, as a query parameter (ntfy action URLs,
+Optional second layer: WEB_BASIC_AUTH=user:password makes every route (except /healthz) also
+require HTTP Basic credentials, on top of the token. /healthz is always open (healthchecks).
+
+Token auth: every route needs `token` == config.WEB_TOKEN, as a query parameter (ntfy action URLs,
 home-screen bookmark) or the `tt_token` cookie set on the first successful visit.
 """
 from __future__ import annotations
@@ -15,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from croniter import croniter
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -228,6 +231,18 @@ def _token_ok(given: str | None) -> bool:
     return bool(given) and hmac.compare_digest(given.encode(), config.WEB_TOKEN.encode())
 
 
+def _basic_ok(header: str | None) -> bool:
+    """Valid `Authorization: Basic` for config.WEB_BASIC_AUTH (user:password); constant time."""
+    import base64
+    if not header or not header.lower().startswith("basic "):
+        return False
+    try:
+        given = base64.b64decode(header[6:].strip(), validate=True)
+    except ValueError:
+        return False
+    return hmac.compare_digest(given, config.WEB_BASIC_AUTH.encode())
+
+
 async def _form(request: Request) -> dict:
     if request.headers.get("content-type", "").startswith("application/x-www-form-urlencoded"):
         body = (await request.body()).decode(errors="replace")
@@ -239,10 +254,17 @@ def create_app() -> FastAPI:
     if not config.WEB_TOKEN:
         raise RuntimeError("WEB_TOKEN is empty; set it in config/trader.env before starting the web app")
     app = FastAPI(title="Thesis Trader", docs_url=None, redoc_url=None, openapi_url=None)
+    if config.WEB_BASIC_AUTH and ":" not in config.WEB_BASIC_AUTH:
+        raise RuntimeError("WEB_BASIC_AUTH must look like user:password")
     app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
     @app.middleware("http")
     async def auth(request: Request, call_next):
+        if request.url.path == "/healthz":  # container healthcheck: no auth, reveals nothing
+            return JSONResponse({"ok": True})
+        if config.WEB_BASIC_AUTH and not _basic_ok(request.headers.get("authorization")):
+            return Response("Authentication required", status_code=401,
+                            headers={"WWW-Authenticate": 'Basic realm="Thesis Trader", charset="UTF-8"'})
         q = request.query_params.get("token")
         c = request.cookies.get(COOKIE)
         ok = _token_ok(q) if q is not None else _token_ok(c)

@@ -19,7 +19,7 @@ def push(text: str, *, title: str | None = None, priority: int | None = None,
     own = conn is None
     conn = conn or connect()
     try:
-        journal(conn, "notify", text, data={"title": title, "actions": actions})
+        journal(conn, "notify", text, data={"title": title, "actions": _redact(actions)})
     finally:
         if own:
             conn.close()
@@ -46,13 +46,32 @@ def push(text: str, *, title: str | None = None, priority: int | None = None,
         return False
 
 
+def _redact(actions: list[dict] | None) -> list[dict] | None:
+    """Copy of `actions` with header values hidden: the journal must not store credentials."""
+    if not actions:
+        return actions
+    return [{**a, "headers": {k: "***" for k in a["headers"]}} if a.get("headers") else a for a in actions]
+
+
+def _q(v: str) -> str:
+    """ntfy action values are comma/semicolon separated; quote a value that contains either
+    (single quotes, or double quotes when the value itself holds a single quote)."""
+    if not any(c in v for c in ",;") or v[:1] in "'\"":
+        return v
+    return f'"{v}"' if "'" in v else f"'{v}'"
+
+
 def _fmt_action(a: dict) -> str:
-    """ntfy header action format: `http, Label, url, method=POST, clear=true`."""
-    parts = [a.get("action", "http"), a["label"], a["url"]]
+    """ntfy header action format (https://docs.ntfy.sh/publish/#send-http-request):
+    `http, Label, url, method=POST, headers.Authorization=Basic xxx, body='{"a":1}', clear=true`."""
+    parts = [a.get("action", "http"), _q(a["label"]), _q(a["url"])]
     if a.get("method"):
         parts.append(f"method={a['method']}")
+    for k, v in (a.get("headers") or {}).items():
+        parts.append(f"headers.{k}={_q(str(v))}")
     if a.get("body"):
-        parts.append("body=" + json.dumps(a["body"]).replace(",", "\\,"))
+        body = a["body"] if isinstance(a["body"], str) else json.dumps(a["body"])
+        parts.append("body=" + _q(body))
     if a.get("clear"):
         parts.append("clear=true")
     return ", ".join(parts)

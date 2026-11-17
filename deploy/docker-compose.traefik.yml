@@ -1,0 +1,25 @@
+# Optional overlay: put the web dashboard behind an existing Traefik (Docker provider) and stop
+# publishing a host port. Only `web` is touched; the broker stays internal-only.
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.traefik.yml up -d --build
+# Needs deploy/.env: TRADER_HOST (required), TRAEFIK_NETWORK, TRAEFIK_ENTRYPOINT, ...
+# The Traefik entrypoint/DNS should be reachable on the tailnet only (see deploy/README.md).
+services:
+  web:
+    ports: !reset []
+    networks:
+      - default
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-traefik}
+      traefik.http.routers.thesis.rule: Host(`${TRADER_HOST:?set TRADER_HOST in deploy/.env}`)
+      traefik.http.routers.thesis.entrypoints: ${TRAEFIK_ENTRYPOINT:-websecure}
+      traefik.http.routers.thesis.tls: ${TRAEFIK_TLS:-true}
+      # Uncomment and set TRAEFIK_CERTRESOLVER in deploy/.env if Traefik should issue the cert:
+      # traefik.http.routers.thesis.tls.certresolver: ${TRAEFIK_CERTRESOLVER}
+      traefik.http.services.thesis.loadbalancer.server.port: "8010"
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik}

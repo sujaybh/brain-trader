@@ -1,0 +1,97 @@
+# Thesis Trader on Docker Compose. Run from the repo root:
+#   docker compose -f deploy/docker-compose.yml up -d --build
+# (or use deploy/switch.sh docker, which also makes sure the systemd units are off).
+# Settings come from deploy/.env (see deploy/.env.example) and the env files in config/.
+name: ${COMPOSE_PROJECT_NAME:-thesis}
+
+x-common: &common
+  image: thesis-trader:local
+  restart: unless-stopped
+  # Same uid/gid as the host user who owns ./data, so the bind-mounted trader.db stays writable.
+  user: "${TRADER_UID:-1000}:${TRADER_GID:-1000}"
+  init: true
+  extra_hosts:
+    - "host.docker.internal:host-gateway"   # reach Ollama on the Docker host
+  environment: &common-env
+    TZ: America/New_York
+    # The container's own view of the Ollama fallback; the host's 127.0.0.1 is not this container.
+    OLLAMA_FALLBACK_URL: ${OLLAMA_FALLBACK_URL:-http://host.docker.internal:11434}
+    # No Claude CLI in the image: chat and reviews use Ollama.
+    LLM_BACKEND: ${LLM_BACKEND:-ollama}
+  volumes:
+    - ${DATA_DIR:-../data}:/app/data
+    - ${LIMITS_FILE:-../config/limits.json}:/app/config/limits.json:ro
+
+services:
+  broker:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        UID: ${TRADER_UID:-1000}
+        GID: ${TRADER_GID:-1000}
+    command: ["python", "-m", "broker"]
+    # Only this service gets the Alpaca keys. NO published ports: the compose-internal network is
+    # the only way in (BROKER_TOKEN is still required on every call).
+    env_file:
+      - ${ALPACA_ENV_FILE:-../config/alpaca.env}
+      - ${TRADER_ENV_FILE:-../config/trader.env}
+    environment:
+      <<: *common-env
+      BROKER_HOST: 0.0.0.0     # inside the container only; nothing is published
+      BROKER_PORT: "8787"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  web:
+    <<: *common
+    image: thesis-trader:local
+    command: ["python", "-m", "web"]
+    depends_on:
+      broker:
+        condition: service_healthy
+    env_file:
+      - ${TRADER_ENV_FILE:-../config/trader.env}
+    environment:
+      <<: *common-env
+      BROKER_URL: http://broker:8787
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: "8010"
+      # Passed through only when set in deploy/.env or the shell; otherwise config/trader.env wins.
+      WEB_BASIC_AUTH:
+      WEB_URL:
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8010}:8010"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8010/healthz', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  scheduler:
+    <<: *common
+    image: thesis-trader:local
+    command: ["python", "scheduler/cron_loop.py"]
+    depends_on:
+      broker:
+        condition: service_healthy
+    env_file:
+      - ${TRADER_ENV_FILE:-../config/trader.env}
+    environment:
+      <<: *common-env
+      BROKER_URL: http://broker:8787
+      WEB_BASIC_AUTH:
+      WEB_URL:
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "scheduler/cron_loop.py", "--healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
