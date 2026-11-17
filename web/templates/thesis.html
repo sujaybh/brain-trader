@@ -1,11 +1,12 @@
 {% extends "base.html" %}{% set nav='' %}
-{% from "_macros.html" import proposal_card, positions_table, journal_list %}
+{% from "_macros.html" import proposal_card, positions_table, journal_list, vs_spy %}
 {% block title %}{{ t.name }}{% endblock %}
 {% block body %}
 <h1>{{ t.name }} <span class="pill {{ t.status }}">{{ t.status }}</span></h1>
 <div class="card">
   <div class="pre">{{ readback }}</div>
   <div class="muted small" style="margin-top:6px">{{ deployed|money }} of {{ spec.capital_cap|money }} deployed · mode {{ t.mode }}{% if next_slot %} · next buy {{ next_slot|local }} ET{% endif %}</div>
+  {{ vs_spy(vs_spy_data) }}
   {% if spec.rationale %}<div style="margin-top:8px"><span class="muted small">Why:</span> {{ spec.rationale }}</div>{% endif %}
   {% if t.source_text %}<div class="muted small" style="margin-top:6px">“{{ t.source_text }}”</div>{% endif %}
   <div class="btns">

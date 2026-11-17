@@ -22,7 +22,19 @@
   {% endfor %}
   <tr><td><strong>Total</strong></td><td></td><td class="num"><strong>{{ g.market_value|money }}</strong></td>
       <td class="num {{ plcls(g.pl) }}"><strong>{{ g.pl|money(true) }}</strong><div class="small">{{ g.plpc|pct }}</div></td></tr>
+  {% if g.realized_pl %}
+  <tr><td colspan="3" class="muted small">Realized (closed / sold)</td>
+      <td class="num {{ plcls(g.realized_pl) }}">{{ g.realized_pl|money(true) }}</td></tr>
+  {% endif %}
 </table>
+{% endmacro %}
+
+{% macro vs_spy(v) %}
+{% if v and v.ok %}
+<div class="row small"><span class="muted">Since {{ v.start }} vs SPY</span><span class="num"><span class="{{ plcls(v.return_pct) }}">{{ v.return_pct|pct }}</span> vs <span class="{{ plcls(v.spy_return_pct) }}">{{ v.spy_return_pct|pct }}</span></span></div>
+{% else %}
+<div class="row small muted"><span>vs SPY</span><span>not enough history</span></div>
+{% endif %}
 {% endmacro %}
 
 {% macro journal_list(js, show_thesis=true) %}

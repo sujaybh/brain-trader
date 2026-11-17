@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 import sqlite3
 import threading
+import time
+from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -374,6 +377,132 @@ class Broker:
         return {"status": status, "client_order_id": client_order_id, "order": order_out(r)}
 
 
+# ------------------------------------------------------------------------------ fill watcher
+
+DEFAULT_FILL_POLL_SECONDS = 60.0
+CLOCK_CACHE_SECONDS = 300.0
+
+
+def fill_poll_seconds() -> float:
+    """BROKER_FILL_POLL_SECONDS (default 60). 0, "off", "false" or "no" turns the watcher off."""
+    raw = (os.environ.get("BROKER_FILL_POLL_SECONDS") or "").strip().lower()
+    if raw == "":
+        return DEFAULT_FILL_POLL_SECONDS
+    if raw in ("off", "false", "no", "none"):
+        return 0.0
+    try:
+        return max(float(raw), 0.0)
+    except ValueError:
+        log.warning("BROKER_FILL_POLL_SECONDS=%r is not a number; using %s", raw, DEFAULT_FILL_POLL_SECONDS)
+        return DEFAULT_FILL_POLL_SECONDS
+
+
+class FillWatcher:
+    """Background thread: while the market is open and we have open orders, reconcile them every
+    `interval` seconds so fills are journaled and pushed within about a minute instead of at the
+    next 15-minute tick.
+
+    It only ever calls `Broker.reconcile` (backend.get_order + apply_update) under `order_lock`,
+    exactly like POST /reconcile, so it never places, cancels or modifies an order. No double
+    pushes: apply_update journals/pushes only when the backend's filled_qty exceeds the
+    filled_qty stored in our orders row, and every caller (this loop, /reconcile from the tick,
+    /orders, placement) holds `order_lock` while it reads and writes that row, so whichever
+    caller sees a fill first records it and the others see no change.
+
+    Cheap when idle: one SQLite query per interval; the backend clock is only asked when there
+    are open orders, and its answer is cached for up to CLOCK_CACHE_SECONDS but never past the
+    next open/close. Exceptions are logged and the loop carries on."""
+
+    def __init__(self, broker: "Broker", interval: float):
+        self.broker = broker
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._clock: Optional[tuple[bool, float]] = None  # (is_open, valid_until monotonic)
+
+    def market_open(self) -> bool:
+        now = time.monotonic()
+        if self._clock and now < self._clock[1]:
+            return self._clock[0]
+        c = self.broker.backend.clock()
+        is_open = bool(c.get("is_open"))
+        ttl = CLOCK_CACHE_SECONDS
+        nxt = c.get("next_close") if is_open else c.get("next_open")
+        try:
+            if nxt:
+                until = (datetime.fromisoformat(str(nxt)) - datetime.now(timezone.utc)).total_seconds()
+                ttl = min(ttl, max(until, 0.0))
+        except (TypeError, ValueError):  # unparseable or naive timestamp: plain TTL
+            pass
+        self._clock = (is_open, now + ttl)
+        return is_open
+
+    def poll_once(self) -> int:
+        """One pass. Returns the number of order rows updated."""
+        conn = self.broker.connect()
+        try:
+            marks = ",".join("?" * len(NON_TERMINAL))
+            if not conn.execute(f"SELECT 1 FROM orders WHERE status IN ({marks}) AND broker_order_id IS NOT NULL "
+                                f"LIMIT 1", NON_TERMINAL).fetchone():
+                return 0
+            if not self.market_open():
+                return 0
+            with self.broker.order_lock:
+                n = self.broker.reconcile(conn)
+            if n:
+                log.info("fill watcher: %d order(s) updated", n)
+            return n
+        finally:
+            conn.close()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self.poll_once()
+            except Exception:  # noqa: BLE001 - a bad poll must never kill the daemon
+                log.exception("fill watcher poll failed")
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="fill-watcher", daemon=True)
+        self._thread.start()
+        log.info("fill watcher started (every %gs during market hours)", self.interval)
+
+    def stop(self, timeout: float = 10.0) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout)
+            self._thread = None
+
+
+# ------------------------------------------------------------------------------ bars
+
+BARS_MAX_DAYS = 3660
+BARS_MAX_SYMBOLS = 50
+
+
+def daily_bars(backend: Backend, symbols: list[str], start: Optional[str], end: Optional[str],
+               days: int) -> dict:
+    """GET /bars: read-only daily bars. `end` defaults to today (market tz), `start` to `days`
+    calendar days before `end`. Touches neither the DB nor the limit chain."""
+    if len(symbols) > BARS_MAX_SYMBOLS:
+        raise HTTPException(422, f"at most {BARS_MAX_SYMBOLS} symbols per request")
+    try:
+        d1 = datetime.strptime(end, "%Y-%m-%d").date() if end else _now_market().date()
+        d0 = datetime.strptime(start, "%Y-%m-%d").date() if start else d1 - timedelta(days=days)
+    except ValueError:
+        raise HTTPException(422, "start/end must be YYYY-MM-DD")
+    if d0 > d1:
+        raise HTTPException(422, "start is after end")
+    if (d1 - d0).days > BARS_MAX_DAYS:
+        raise HTTPException(422, f"window longer than {BARS_MAX_DAYS} days")
+    source = "alpaca-iex" if backend.name == "alpaca" else backend.name
+    return {"source": source, "start": d0.isoformat(), "end": d1.isoformat(),
+            "bars": backend.daily_bars(symbols, d0, d1)}
+
+
 # ------------------------------------------------------------------------------ app
 
 def create_app(backend: Optional[Backend] = None, *, db_path: Optional[Path] = None,
@@ -384,6 +513,7 @@ def create_app(backend: Optional[Backend] = None, *, db_path: Optional[Path] = N
                     config.BROKER_TOKEN if token is None else token, limits)
     app = FastAPI(title="Thesis Trader broker", version="1")
     app.state.broker = broker
+    _attach_fill_watcher(app, broker)
 
     def require_token(x_broker_token: Optional[str] = Header(default=None)) -> None:
         if not broker.token or not x_broker_token or not hmac.compare_digest(x_broker_token, broker.token):
@@ -441,6 +571,11 @@ def create_app(backend: Optional[Backend] = None, *, db_path: Optional[Path] = N
     def assets(symbols: str = Query(...)) -> dict:
         return broker.backend.assets(symbols_param(symbols))
 
+    @api.get("/bars")
+    def bars(symbols: str = Query(...), start: Optional[str] = None, end: Optional[str] = None,
+             days: int = Query(30, ge=1, le=BARS_MAX_DAYS)) -> dict:
+        return daily_bars(broker.backend, symbols_param(symbols), start, end, days)
+
     @api.post("/orders")
     def place_order(body: OrderIn) -> JSONResponse:
         return broker.place(body)
@@ -494,3 +629,25 @@ def create_app(backend: Optional[Backend] = None, *, db_path: Optional[Path] = N
 
     app.include_router(api)
     return app
+
+
+def _attach_fill_watcher(app: FastAPI, broker: Broker, interval: Optional[float] = None) -> None:
+    """Run a FillWatcher for the app's lifetime (uvicorn startup/shutdown, or `with TestClient`).
+    `app.state.fill_watcher` is None when BROKER_FILL_POLL_SECONDS turns it off."""
+    secs = fill_poll_seconds() if interval is None else interval
+    app.state.fill_watcher = FillWatcher(broker, secs) if secs > 0 else None
+    inner = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(a):
+        w = a.state.fill_watcher
+        if w:
+            w.start()
+        try:
+            async with inner(a) as st:
+                yield st
+        finally:
+            if w:
+                w.stop()
+
+    app.router.lifespan_context = lifespan

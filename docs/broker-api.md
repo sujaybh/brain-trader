@@ -21,6 +21,7 @@ journaled (`kind=refused`) and pushed to the phone. Upstream Alpaca errors retur
 | GET | `/positions` | list of `{"symbol", "qty", "avg_entry_price", "current_price", "market_value", "cost_basis", "unrealized_pl", "unrealized_plpc"}` straight from Alpaca |
 | GET | `/quote?symbols=NVDA,AMD` | `{"NVDA": {"bid", "ask", "last", "ts"}, ...}` |
 | GET | `/assets?symbols=...` | `{"NVDA": {"tradable": bool, "fractionable": bool, "name", "exchange", "asset_class"}, ...}`; unknown symbols map to `null` |
+| GET | `/bars?symbols=NVDA,SPY&start=YYYY-MM-DD&end=YYYY-MM-DD` | daily bars, read-only: `{"source": "alpaca-iex"\|"fake", "start", "end", "bars": {"NVDA": [{"date", "open", "high", "low", "close", "volume", "vwap"}, ...]}}`. Alpaca's free IEX feed, split- and dividend-adjusted, keyed by trading date. `end` defaults to today, `start` to `days` (default 30) before `end`; ≤ 50 symbols and ≤ 3660 days per request. Unknown symbols map to `[]`. The fake backend returns deterministic synthetic weekday bars |
 | POST | `/orders` | place one order (below) |
 | GET | `/orders?status=open\|closed\|all&limit=100` | our orders table joined with live Alpaca status |
 | GET | `/orders/{client_order_id}` | one order, refreshed from Alpaca |
@@ -79,6 +80,18 @@ Alpaca accepts `notional` only on market orders, and we never send market orders
 `notional` request becomes `qty = floor(notional / limit_price, qty_decimals)` on a limit
 order. The response reports both. Filled notional is `filled_qty * filled_avg_price`, from
 the fill, never from the request.
+
+## Fill watcher
+
+Fills are journaled (`kind=fill`) and pushed by the daemon itself, from `apply_update`. Besides
+`/reconcile` (called by every 15-minute tick when orders are open), a background thread in the
+daemon reconciles open orders every `BROKER_FILL_POLL_SECONDS` (default 60; `0`/`off` disables)
+while the market is open, so a fill reaches the phone within about a minute. It only calls
+`get_order` and never places, cancels or changes an order. It costs one SQLite query per interval
+when nothing is open; the backend clock is asked only when something is open and is cached for
+up to 5 minutes (never past the next open/close). Errors are logged and the loop continues; the
+thread stops with the app. No double pushes: a fill is pushed only when the backend's
+`filled_qty` exceeds the stored one, and every path that reconciles holds the same order lock.
 
 ## Backends
 

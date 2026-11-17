@@ -22,7 +22,8 @@ from starlette.concurrency import run_in_threadpool
 
 from trader import client as tclient
 from trader import config
-from trader.db import connect, deployed_by_thesis, qty_by_thesis, row, rows
+from trader.db import connect, deployed_by_thesis, row, rows
+from trader.pnl import lots_by_thesis, vs_benchmark
 from trader.spec import ThesisSpec, describe
 from tools.usage import summary as claude_usage_summary
 
@@ -118,26 +119,29 @@ def next_slot(spec: dict, status: str) -> str | None:
 
 def positions_by_thesis(conn, live: list[dict]) -> list[dict]:
     """Alpaca positions don't carry a thesis; attribute them from our filled orders. Each group:
-    {thesis_id, rows: [{symbol, qty, cost, price, market_value, pl, plpc}], totals}."""
+    {thesis_id, rows: [{symbol, qty, cost, price, market_value, pl, plpc}], totals, realized_pl}.
+    Cost is average cost (trader/pnl.py); `pl` is unrealized only. Closed positions leave the rows
+    and show up in `realized_pl` (a thesis with only closed positions still gets a group)."""
     live_by = {p["symbol"]: p for p in live}
-    dep, qty = deployed_by_thesis(conn), qty_by_thesis(conn)
+    lots = lots_by_thesis(conn)
     groups, attributed = [], {}
-    for tid in sorted(set(dep) | set(qty)):
+    for tid in sorted(lots):
         rs = []
-        for sym in sorted(set(dep.get(tid, {})) | set(qty.get(tid, {}))):
-            q = qty.get(tid, {}).get(sym, 0.0)
-            if q <= 1e-9:
+        realized = round(sum(x["realized"] for x in lots[tid].values()), 2)
+        for sym in sorted(lots[tid]):
+            q = lots[tid][sym]["qty"]
+            if q <= 1e-4:  # closed (below qty_decimals=4 granularity)
                 continue
             attributed[sym] = attributed.get(sym, 0.0) + q
             lp = live_by.get(sym)
             price = _f(lp.get("current_price")) if lp else None
-            cost = dep.get(tid, {}).get(sym, 0.0)
+            cost = round(lots[tid][sym]["cost"], 2)
             mv = round(q * price, 2) if price is not None else None
             pl = round(mv - cost, 2) if mv is not None else None
             rs.append({"symbol": sym, "qty": q, "cost": cost, "price": price, "market_value": mv, "pl": pl,
                        "plpc": round(pl / cost * 100, 2) if pl is not None and cost > 0 else None})
-        if rs:
-            groups.append({"thesis_id": tid, "rows": rs, **_totals(rs)})
+        if rs or abs(realized) >= 0.005:
+            groups.append({"thesis_id": tid, "rows": rs, **_totals(rs), "realized_pl": realized})
     # anything Alpaca holds that our orders don't explain (placed outside the system, corporate actions)
     extra = []
     for sym, lp in sorted(live_by.items()):
@@ -180,8 +184,17 @@ def thesis_rows(conn) -> list[dict]:
                          "ORDER BY id DESC LIMIT 1", (t["id"],))
         out.append({"id": t["id"], "name": t["name"], "status": t["status"], "mode": t["mode"],
                     "deployed": round(sum(max(v, 0) for v in dep.get(t["id"], {}).values()), 2),
-                    "cap": spec.get("capital_cap"), "next_slot": next_slot(spec, t["status"]), "last": last})
+                    "cap": spec.get("capital_cap"), "next_slot": next_slot(spec, t["status"]), "last": last,
+                    "vs_spy": _vs_spy(conn, t["id"], t["created"])})
     return out
+
+
+def _vs_spy(conn, thesis_id: str, created: str | None) -> dict:
+    """Return since creation vs SPY (trader/pnl.py); never raises into the dashboard."""
+    try:
+        return vs_benchmark(conn, thesis_id, created)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"unavailable: {type(e).__name__}: {e}"}
 
 
 def state(conn) -> dict:
@@ -274,6 +287,7 @@ def create_app() -> FastAPI:
                 "broker_error": err, "group": groups[0] if groups else None,
                 "deployed": round(sum(max(v, 0) for v in deployed_by_thesis(conn).get(thesis_id, {}).values()), 2),
                 "next_slot": next_slot(spec, t["status"]),
+                "vs_spy_data": _vs_spy(conn, thesis_id, t["created"]),
                 "proposals": [p for p in proposals.list_pending(conn) if p["thesis_id"] == thesis_id],
                 "journal": rows(conn, "SELECT * FROM journal WHERE thesis_id=? AND kind!='notify' ORDER BY id DESC LIMIT 50",
                                 (thesis_id,)),

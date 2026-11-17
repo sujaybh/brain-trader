@@ -126,6 +126,19 @@ CREATE TABLE IF NOT EXISTS claude_usage (
     ok            INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS claude_usage_ts ON claude_usage(ts);
+CREATE TABLE IF NOT EXISTS bars (
+    symbol  TEXT NOT NULL,
+    date    TEXT NOT NULL,                        -- YYYY-MM-DD trading day (market tz)
+    open    REAL NOT NULL,
+    high    REAL NOT NULL,
+    low     REAL NOT NULL,
+    close   REAL NOT NULL,
+    volume  REAL,
+    vwap    REAL,
+    source  TEXT,                                 -- alpaca-iex | fake
+    fetched TEXT NOT NULL,
+    PRIMARY KEY (symbol, date)
+);
 """
 
 
@@ -142,6 +155,34 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(SCHEMA)
+    _migrate(conn)
+    return conn
+
+
+# Columns added after a table first shipped: (table, column, type). CREATE TABLE IF NOT EXISTS
+# never alters an existing table, so connect() adds whatever is missing. Additive only, so an
+# older reader of the same DB keeps working.
+COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("snapshots", "realized_pl", "REAL"),  # cumulative realized P&L (average cost) for that thesis x symbol
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, col, typ in COLUMN_MIGRATIONS:
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if col not in have:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            except sqlite3.OperationalError as e:  # another process added it first
+                if "duplicate column" not in str(e).lower():
+                    raise
+
+
+def connect_ro(path: Path | None = None) -> sqlite3.Connection:
+    """Read-only connection (backtests, reports): no schema creation, no writes possible."""
+    path = path or config.DB_PATH
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+    conn.row_factory = sqlite3.Row
     return conn
 
 
@@ -206,4 +247,40 @@ def qty_by_thesis(conn: sqlite3.Connection) -> dict[str, dict[str, float]]:
         sign = 1 if r["side"] == "buy" else -1
         d = out.setdefault(r["thesis_id"], {})
         d[r["symbol"]] = round(d.get(r["symbol"], 0.0) + sign * (r["q"] or 0.0), 6)
+    return out
+
+
+BAR_FIELDS = ("open", "high", "low", "close", "volume", "vwap")
+
+
+def upsert_bars(conn: sqlite3.Connection, symbol: str, bars: list[dict], source: str) -> int:
+    """Insert or replace daily bars ({"date", "open", "high", "low", "close", ...}). Returns count."""
+    now = now_iso()
+    conn.executemany(
+        "INSERT INTO bars(symbol, date, open, high, low, close, volume, vwap, source, fetched) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(symbol, date) DO UPDATE SET open=excluded.open, "
+        "high=excluded.high, low=excluded.low, close=excluded.close, volume=excluded.volume, "
+        "vwap=excluded.vwap, source=excluded.source, fetched=excluded.fetched",
+        [(symbol, b["date"], *(b.get(k) for k in BAR_FIELDS), source, now) for b in bars])
+    return len(bars)
+
+
+def load_bars(conn: sqlite3.Connection, symbols: list[str], start: str | None = None,
+              end: str | None = None) -> dict[str, list[dict]]:
+    """symbol -> bars sorted by date, each {"date", "open", "high", "low", "close", "volume", "vwap"}.
+    `start`/`end` are inclusive YYYY-MM-DD bounds."""
+    out: dict[str, list[dict]] = {s: [] for s in symbols}
+    if not symbols:
+        return out
+    sql = f"SELECT symbol, date, {', '.join(BAR_FIELDS)} FROM bars WHERE symbol IN ({','.join('?' * len(symbols))})"
+    params: list = list(symbols)
+    if start:
+        sql += " AND date>=?"
+        params.append(start)
+    if end:
+        sql += " AND date<=?"
+        params.append(end)
+    for r in conn.execute(sql + " ORDER BY symbol, date", params):
+        d = dict(r)
+        out[d.pop("symbol")].append(d)
     return out
